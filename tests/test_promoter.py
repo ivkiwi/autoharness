@@ -517,16 +517,18 @@ def test_create_with_an_unusable_name_is_rejected_cleanly(tmp_path):
 
 
 def test_update_can_still_rewrite_an_existing_legacy_subfile(tmp_path):
-    # the new-name limits are for names being created; a skill's existing references/aux.md stays updatable
+    # the new-name limits are for names being created; an existing over-long subfile stays updatable
     roots = _roots(tmp_path)
-    body = GOOD_BODY + "See references/aux.md for the notes\n"
+    legacy_rel = "references/" + "n" * 104 + ".md"  # portable: no reserved device name involved
+    body = GOOD_BODY + f"See {legacy_rel} for the notes\n"
     assert promoter.promote(_create(body=GOOD_BODY), roots=roots)["ok"]
-    legacy = layer.symbol_dir("project", "foo", roots["project"]) / "references" / "aux.md"
+    legacy = layer.symbol_dir("project", "foo", roots["project"]) / legacy_rel
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text("old\n")
-    upd = {"action": "update", "name": "foo", "body": body, "files": {"references/aux.md": "new\n"},
+    upd = {"action": "update", "name": "foo", "body": body, "files": {legacy_rel: "new\n"},
            "reason": "r", "evidence": "e"}
     v = promoter.promote(upd, roots=roots)
     assert v["ok"], v["findings"]
-    bad = {**upd, "files": {"references/nul.md": "x\n"}, "body": GOOD_BODY + "See references/nul.md for the notes\n"}
-    assert "files" in _families(promoter.promote(bad, roots=roots))  # a new reserved name is still refused
+    fresh = "references/" + "m" * 104 + ".md"
+    bad = {**upd, "files": {fresh: "x\n"}, "body": GOOD_BODY + f"See {fresh} for the notes\n"}
+    assert "files" in _families(promoter.promote(bad, roots=roots))  # a new over-long name is still refused
