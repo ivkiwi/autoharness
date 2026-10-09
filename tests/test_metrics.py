@@ -67,7 +67,7 @@ def test_funnel_and_reuse_signals(tmp_path):
         {"ok": True, "findings": []}, {"ok": False, "findings": ["altitude"]},
         {"ok": False, "findings": ["trigger"]}]}))
     m = metrics.collect(roots)["project"]
-    assert m["funnel"] == {"proposed": 3, "landed": 1, "rejected": 2}
+    assert m["funnel"] == {"proposed": 3, "landed": 1, "held": 0, "rejected": 2}
     assert m["reject_families"]["altitude"] == 1 and m["reject_families"]["trigger"] == 1
     assert m["reuse_after_patch"] == 1 / 2  # one of two patched symbols was re-used since
 

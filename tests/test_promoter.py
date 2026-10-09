@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from autoharness import config
 from autoharness.hook import promoter
 from autoharness.lib import counters, intent_queue, layer, ledger, sidecar, skill_store
 
@@ -379,7 +380,9 @@ def test_reject_poison_subfile_zero_disk(tmp_path):
     assert not _sdir(roots).exists()  # zero on-disk change: no subfiles, no evidence, no SKILL.md
 
 
-def test_landing_symlink_escape_rejected_zero_write(tmp_path, dir_link):
+@pytest.mark.parametrize("propose_only", [False, True])  # a proposal must not pass what landing refuses
+def test_landing_symlink_escape_rejected_zero_write(tmp_path, dir_link, monkeypatch, propose_only):
+    monkeypatch.setattr(config, "PROPOSE_ONLY", propose_only)
     roots = _roots(tmp_path)
     root = roots["project"]
     skill_store.write_body("project", "foo", GOOD_BODY, root)
@@ -452,9 +455,11 @@ def test_remove_file_unlinks_ledgers_keeps_body(tmp_path):
     assert entry["evidence"].startswith("references/evidence-")
 
 
-def test_remove_file_still_referenced_rejected(tmp_path):
+@pytest.mark.parametrize("propose_only", [False, True])
+def test_remove_file_still_referenced_rejected(tmp_path, monkeypatch, propose_only):
     roots = _roots(tmp_path)
     _live_with_subfile(roots)  # FILES_BODY still points at scripts/run.sh
+    monkeypatch.setattr(config, "PROPOSE_ONLY", propose_only)  # after setup: it lands nothing itself
     v = promoter.promote(_remove(), roots=roots)
     assert not v["ok"] and "landing" in _families(v)
     assert (_sdir(roots) / "scripts" / "run.sh").exists()  # nothing removed

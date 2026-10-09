@@ -96,28 +96,42 @@ def _materialize_evidence(level, name, evidence, root):
     return rel
 
 
-def _land_files(level, name, files, root):
-    if not files:
-        return
-    sdir = layer.symbol_dir(level, name, root).resolve()
-    paths = {rel: layer.subfile_path(level, name, rel, root) for rel in sorted(files)}
-    for rel, p in paths.items():
-        if not p.resolve().is_relative_to(sdir):
-            raise ValueError(f"subfile escapes the skill dir: {rel}")
-    for rel, p in paths.items():
-        atomic.write_text(p, files[rel])
-
-
-def _remove_subfile(level, name, rel, root):
+def _inside(level, name, rel, root):
     p = layer.subfile_path(level, name, rel, root)
-    sdir = layer.symbol_dir(level, name, root).resolve()
-    if not p.resolve().is_relative_to(sdir):
+    if not p.resolve().is_relative_to(layer.symbol_dir(level, name, root).resolve()):
         raise ValueError(f"subfile escapes the skill dir: {rel}")
+    return p
+
+
+def _removable(level, name, rel, root):
+    p = _inside(level, name, rel, root)
     live = skill_store.read_body(level, name, root) or ""
     # Use word-boundary check so scripts/run.py does not match scripts/run.py.bak
     _ref = re.compile(r"(?<![A-Za-z0-9_./-])" + re.escape(rel) + r"(?![A-Za-z0-9_./-])")
     if _ref.search(live):
         raise ValueError(f"{rel} is still referenced by the live SKILL.md (patch the pointer out first)")
+    return p
+
+
+def _check_landing(action, intent, level, name, root):
+    """Every refusal _land can raise, without writing: a proposal must not pass what landing refuses."""
+    if action == "remove_file":
+        _removable(level, name, intent["path"], root)
+    elif action != "delete":
+        for rel in sorted(intent.get("files") or {}):
+            _inside(level, name, rel, root)
+
+
+def _land_files(level, name, files, root):
+    if not files:
+        return
+    paths = {rel: _inside(level, name, rel, root) for rel in sorted(files)}  # all checked before any write
+    for rel, p in paths.items():
+        atomic.write_text(p, files[rel])
+
+
+def _remove_subfile(level, name, rel, root):
+    p = _removable(level, name, rel, root)
     if p.is_file():
         p.unlink()
 
@@ -222,11 +236,12 @@ def promote(intent, *, roots=None, repo_name=None):
     )
     if not verdict["ok"]:
         return _reject(action, level, verdict["findings"])
-    if config.PROPOSE_ONLY:
-        return {"ok": True, "action": action, "level": level, "findings": [], "notes": _notes(action, body),
-                "proposed": True}
 
     try:
+        _check_landing(action, intent, level, name, root)
+        if config.PROPOSE_ONLY:
+            return {"ok": True, "action": action, "level": level, "findings": [], "notes": _notes(action, body),
+                    "proposed": True}
         _land(action, intent, body, level, name, root)
     except ValueError as exc:
         return _reject(action, level, [("landing", str(exc))])
@@ -264,7 +279,7 @@ def _account(run_id, intents, verdicts, proot):
     proposed = sum(1 for r in rows if r.get("proposed"))
     landed = sum(1 for r in rows if r["ok"]) - proposed
     absorbed = sum(1 for i, v in zip(intents, verdicts, strict=True)
-                   if v["ok"] and i.get("action") == "delete" and i.get("absorbed_into"))
+                   if v["ok"] and not v.get("proposed") and i.get("action") == "delete" and i.get("absorbed_into"))
     families = sorted({f for r in rows if not r["ok"] for f in r["findings"]})
     state = layer.state_dir(layer.PROJECT, proot)
     runs = state / "runs"
@@ -275,7 +290,8 @@ def _account(run_id, intents, verdicts, proot):
                       json.dumps({"run_id": run_id, "landed": landed, "proposed": proposed,
                                   "rejected": len(rows) - landed - proposed, "absorbed": absorbed,
                                   "families": families,
-                                  "uncategorized": sum(1 for r in rows if "category" in r["notes"])},
+                                  "uncategorized": sum(1 for r in rows
+                                                       if "category" in r["notes"] and not r.get("proposed"))},
                                  ensure_ascii=False))
     return record
 
@@ -328,7 +344,8 @@ def drain(run_id, *, roots=None, repo_name=None):
     # other's skill, and each lands. Held across read→land→clear, which also closes the crash window
     # the account comment below used to leave open to an external writer.
     with lock.file_lock(layer.state_dir(layer.PROJECT, proot) / "drain.lock"):
-        sweep(roots)
+        if not config.PROPOSE_ONLY:  # the orphan sweep deletes files under skills/: a write like any other
+            sweep(roots)
         with intent_queue.locked(run_id, proot):  # a live /learn or reflector appends after we clear
             intents = intent_queue.read(run_id, proot)
             verdicts = [_promote_one(i, roots, repo_name) for i in intents]

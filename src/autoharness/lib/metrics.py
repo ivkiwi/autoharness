@@ -53,7 +53,7 @@ def _deaths(lyr, root, names):
 
 def _funnel(lyr, root):
     runs = layer.state_dir(lyr, root) / "runs"
-    proposed = landed = 0
+    proposed = landed = held = 0
     families = {}
     if runs.exists():
         for path in runs.glob("*.json"):
@@ -63,11 +63,13 @@ def _funnel(lyr, root):
                 continue  # a corrupt account never breaks reporting
             for v in run.get("verdicts", []):
                 proposed += 1
-                if v.get("ok"):
+                if v.get("ok") and v.get("proposed"):
+                    held += 1  # PROPOSE_ONLY: valid, kept for the shared gate, nothing landed
+                elif v.get("ok"):
                     landed += 1
                 for family in v.get("findings", []):
                     families[family] = families.get(family, 0) + 1
-    return {"proposed": proposed, "landed": landed, "rejected": proposed - landed}, families
+    return {"proposed": proposed, "landed": landed, "held": held, "rejected": proposed - landed - held}, families
 
 
 def _category(lyr, name, root):

@@ -1,11 +1,12 @@
 """PROPOSE_ONLY: validate everything, land nothing, keep every intent for a shared gate."""
 import json
+import os
 
 import pytest
 
 from autoharness import config
 from autoharness.hook import on_session_start, promoter
-from autoharness.lib import counters, intent_queue, layer, sidecar, skill_store
+from autoharness.lib import counters, intent_queue, layer, metrics, sidecar, skill_store
 
 BODY = "---\nname: foo\ndescription: Use when formatting a date.\n---\nUse strftime.\n"
 
@@ -108,3 +109,36 @@ def test_summary_line_counts_proposals(roots):
     (state / "last_run.json").write_text(json.dumps({"landed": 0, "proposed": 2, "rejected": 1}))
     line = on_session_start.last_run_summary(roots)
     assert line == "autoharness last run: landed 0, proposed 2, rejected 1"
+
+
+def test_drain_does_not_sweep_skill_dirs(roots, propose_only):
+    proot = roots[layer.PROJECT]
+    skill = layer.skills_dir(layer.PROJECT, proot) / "mine"
+    skill.mkdir(parents=True)
+    sidecar.create(layer.PROJECT, "mine", 0, proot)
+    stale = skill / "SKILL.md.tmp"
+    stale.write_text("half-written")
+    os.utime(stale, (0, 0))  # far older than any sweep threshold
+    before = _snapshot(layer.skills_dir(layer.PROJECT, proot))
+
+    promoter.drain("run1", roots=roots)
+
+    assert _snapshot(layer.skills_dir(layer.PROJECT, proot)) == before
+
+
+def test_proposed_merge_is_not_counted_as_absorbed(roots, propose_only, monkeypatch):
+    proot = roots[layer.PROJECT]
+    for name in ("narrow", "umbrella"):
+        skill_store.write_body(layer.PROJECT, name, BODY.replace("foo", name), proot)
+        sidecar.create(layer.PROJECT, name, 0, proot)
+    intent_queue.append("run1", {"action": "delete", "name": "narrow", "level": "project",
+                                 "absorbed_into": "umbrella", "reason": "merged", "evidence": "e"}, proot)
+
+    [verdict] = promoter.drain("run1", roots=roots)
+
+    assert verdict["ok"] and verdict["proposed"]
+    assert skill_store.exists(layer.PROJECT, "narrow", proot)
+    last = json.loads((layer.state_dir(layer.PROJECT, proot) / "last_run.json").read_text())
+    assert (last["landed"], last["proposed"], last["absorbed"]) == (0, 1, 0)
+    funnel = metrics.collect(roots)[layer.PROJECT]["funnel"]
+    assert (funnel["landed"], funnel["held"], funnel["rejected"]) == (0, 1, 0)
