@@ -75,6 +75,13 @@ def _schema_errors(params):
     if not _nonempty(params, "reason") or not _nonempty(params, "evidence"):
         errors.append(("schema", "LED reason+evidence required"))
 
+    # a non-string here would pass every `is not None` check below and crash the drain later
+    mistyped = [("schema", f"{key} must be a string")
+                for key in ("body", "old_string", "new_string", "path", "level", "absorbed_into")
+                if params.get(key) is not None and not isinstance(params[key], str)]
+    if mistyped:
+        return errors + mistyped
+
     has_body = params.get("body") is not None
     has_delta = params.get("old_string") is not None or params.get("new_string") is not None
     has_files = params.get("files") is not None
@@ -206,6 +213,9 @@ def handle(request, *, run_id, root=None):
 
 
 def serve(stdin=None, stdout=None):
+    if stdin is None and hasattr(sys.stdin, "reconfigure"):
+        # JSON-RPC arrives as UTF-8 whatever the locale codec is; responses are ASCII JSON
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     run_id = os.environ.get(config.RUN_ID_ENV) or config.INTERACTIVE_RUN_ID

@@ -39,7 +39,7 @@ def write_body(lyr, name, body, root=None):
 
 def read_body(lyr, name, root=None):
     p = skill_path(lyr, name, root)
-    return p.read_text() if p.exists() else None
+    return p.read_text(encoding="utf-8") if p.exists() else None
 
 
 def exists(lyr, name, root=None):
@@ -91,12 +91,22 @@ def restore(lyr, name, root=None):
     return dest
 
 
+# an atomic write lives as a .tmp for milliseconds; a younger one may be another hook's write in flight
+ORPHAN_TMP_MIN_AGE_S = 60
+
+
 def sweep_orphans(lyr, root=None):
     skills = layer.skills_dir(lyr, root)
     if not skills.exists():
         return []
     removed = []
+    cutoff = time.time() - ORPHAN_TMP_MIN_AGE_S
     for tmp in skills.rglob("*.tmp"):
-        tmp.unlink()
+        try:
+            if tmp.stat().st_mtime > cutoff:
+                continue
+            tmp.unlink()
+        except FileNotFoundError:
+            continue  # its writer renamed it into place meanwhile
         removed.append(tmp)
     return removed

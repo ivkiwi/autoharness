@@ -34,7 +34,7 @@ _VALIDATORS = {"luhn": _passes_luhn}
 @functools.lru_cache(maxsize=4)
 def _rules(rules_path):
     path = Path(rules_path) if rules_path else config.REDACTION_RULES
-    data = tomllib.loads(path.read_text())
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
     compiled = []
     for category in ("secret", "pii"):
         for rule in data.get(category, []):
@@ -58,14 +58,24 @@ def _placeholders(rules_path):
     return re.compile(rf"\[REDACTED:(?:{names})\]")
 
 
-def _replacer(category, name, validator, placeholders):
+def _inside(text, rules_path):
+    """Predicate: does a match lie entirely inside one of this rule set's placeholders in *text*?"""
+    spans = [m.span() for m in _placeholders(rules_path).finditer(text)]
+    starts = [start for start, _ in spans]
+
+    def inside(match):
+        i = bisect.bisect_right(starts, match.start()) - 1  # placeholders never overlap: one candidate
+        return i >= 0 and match.end() <= spans[i][1]
+
+    return inside
+
+
+def _replacer(category, name, validator, inside):
     token = f"[REDACTED:{category}:{name}]"
-    starts = [start for start, _ in placeholders]
 
     def _replace(match):
-        i = bisect.bisect_right(starts, match.start()) - 1  # placeholders never overlap: one candidate
-        if i >= 0 and match.end() <= placeholders[i][1]:
-            return match.group(0)  # inside an existing placeholder: not raw text
+        if inside(match):
+            return match.group(0)  # an existing placeholder is not raw text
         if validator is not None and not validator(match.group(0)):
             return match.group(0)
         return token
@@ -77,17 +87,18 @@ def redact(text, rules_path=None):
     out = text
     key = str(rules_path) if rules_path else str(config.REDACTION_RULES)
     for category, name, rx, validator in _rules(key):
-        placeholders = [m.span() for m in _placeholders(key).finditer(out)]
-        out = rx.sub(_replacer(category, name, validator, placeholders), out)
+        out = rx.sub(_replacer(category, name, validator, _inside(out, key)), out)
     return out
 
 
 def secret_hits(text, rules_path=None):
     """Names of the secret rules *text* matches — a gate, not a rewrite (PII stays redact-only)."""
     key = str(rules_path) if rules_path else str(config.REDACTION_RULES)
+    inside = _inside(text, key)  # quoting an already-redacted window is not leaking a secret
     return [
         name
         for category, name, rx, validator in _rules(key)
         if category == "secret"
-        and any(validator is None or validator(match.group(0)) for match in rx.finditer(text))
+        and any(not inside(match) and (validator is None or validator(match.group(0)))
+                for match in rx.finditer(text))
     ]

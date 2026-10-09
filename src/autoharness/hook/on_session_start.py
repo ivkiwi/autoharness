@@ -11,6 +11,7 @@ zero intrusion).
 ponytail: GC of orphan session counts (residue from crashed sessions) needs a session-liveness signal to sweep safely (a naive sweep would wrongly delete a concurrent session's live count), so it is deferred until that signal exists — the clear_session primitive is ready (Phase 4), policy left open in cap.md/mng.md.
 """
 import json
+import os
 from pathlib import Path
 
 from autoharness import config
@@ -66,7 +67,7 @@ def recall_index(roots, cwd=None):
             name = path.parent.name
             if not sidecar.is_agent_created(lyr, name, root):
                 continue
-            fm = validate._frontmatter(path.read_text()) or {}
+            fm = validate._frontmatter(path.read_text(encoding="utf-8")) or {}
             desc = _fit(fm.get("description") or "(no description)", config.INDEX_DESC_MAX_CHARS)
             cat = _sanitize(fm.get("category") or "general", 64) or "general"
             groups.setdefault(cat, []).append(f"- {_sanitize(name, 64)} [{lyr}]: {desc}")
@@ -96,7 +97,7 @@ def last_run_summary(roots):
     except OSError:
         return None
     try:
-        last = json.loads(consumed.read_text())
+        last = json.loads(consumed.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return None
     finally:
@@ -131,6 +132,10 @@ def _members(lyr, root):
 
 
 def on_session_start(event=None, *, roots=None):
+    if os.environ.get(config.CHILD_SESSION_ENV):
+        # a reflector/curator child: it must not consume the user's last-run line, run the archive pass
+        # beside the parent, or get a second index on top of its bundle
+        return {"archived": {}, "context": None, "reason": "recursion_guard"}
     roots = roots or {}
     archived = {}
     for lyr in config.active_layers():

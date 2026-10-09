@@ -57,6 +57,28 @@ def test_private_key_block_clipped_before_its_end_line():
     assert "the prose after it stays" in out
 
 
+def test_clipped_key_with_indented_or_padded_body_lines():
+    # pasted inside a YAML block scalar, or with trailing spaces, and clipped before END (digest)
+    indented = "  key: |\n    " + "\n    ".join([_BEGIN, *_BODY]) + "\n  other: value"
+    padded = "\n".join([_BEGIN] + [ln + " " for ln in _BODY]) + "\nthe prose after it stays"
+    for raw, kept in [(indented, "other: value"), (padded, "the prose after it stays")]:
+        out = redact.redact(raw)
+        _no_key_left(out)
+        assert kept in out
+
+
+def test_pgp_private_key_block_is_redacted_whole_and_clipped():
+    begin, end = "-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----END PGP PRIVATE KEY BLOCK-----"
+    body = ["Version: GnuPG v2", "", "lQdGBGYAAAABEADKxAbCdEfGh", "=abcd"]
+    after = "\nthe prose after it stays"
+    for raw in ["\n".join([begin, *body, end]) + after, "\n".join([begin, *body]) + after]:
+        out = redact.redact(raw)
+        for leak in [begin, "GnuPG", "lQdGBGYAAAABEADKxAbCdEfGh", "=abcd", end]:
+            assert leak not in out, f"leaked: {leak}"
+        assert out.endswith(after)
+    assert redact.secret_hits(begin) == ["private_key_block"]
+
+
 def test_private_key_blocks_redact_separately():
     two = "\n".join([_BEGIN, *_BODY, _END, "between the keys", _BEGIN, *_BODY, _END])
     assert "between the keys" in redact.redact(two)
@@ -73,10 +95,11 @@ def test_clipped_key_does_not_swallow_records_up_to_a_later_keys_end():
 
 def test_key_clipped_by_the_digest_record_cap():
     # capture.digest() cuts a record's text and appends its truncation mark to the cut line
-    digest = "user: " + "\n".join([_BEGIN, *_BODY[:2]]) + "...[truncated]\nassistant: done"
-    out = redact.redact(digest)
-    _no_key_left(out)
-    assert "assistant: done" in out
+    for cut in ("...[truncated]", "   ...[truncated]"):  # the cap can land inside trailing padding
+        digest = "user: " + "\n    ".join([_BEGIN, *_BODY[:2]]) + cut + "\nassistant: done"
+        out = redact.redact(digest)
+        _no_key_left(out)
+        assert "assistant: done" in out
 
 
 def test_clipped_legacy_encrypted_key_redacts_its_headers_and_body():
@@ -174,3 +197,10 @@ def test_a_made_up_placeholder_does_not_shield_a_secret():
     # only this rule set's own placeholders are protected; anything else is raw text
     out = redact.redact("[REDACTED:secret:AKIAIOSFODNN7EXAMPLE] and [REDACTED:secret:ghp_" + "c" * 36 + "]")
     assert "AKIAIOSFODNN7EXAMPLE" not in out and "ghp_" not in out
+
+
+def test_secret_hits_ignores_this_rule_sets_own_placeholders():
+    # a skill may quote the redacted window it learned from; that is not a secret
+    once = redact.redact("; ".join(raw for raw, _ in _EACH_SECRET))
+    assert redact.secret_hits(once) == []
+    assert "aws_access_key_id" in redact.secret_hits("[REDACTED:secret:AKIAIOSFODNN7EXAMPLE]")
