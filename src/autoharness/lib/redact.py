@@ -6,6 +6,7 @@ LED); this module only consumes rules, it does not own them. Each match is repla
 `validate = "<name>"` to gate its regex matches through a named checker here (e.g. luhn for
 credit_card), keeping sequences that fail the check in the stream as evidence.
 """
+import bisect
 import functools
 import re
 import tomllib
@@ -48,13 +49,26 @@ def _rules(rules_path):
     return compiled
 
 
-def _replacer(category, name, validator):
+@functools.lru_cache(maxsize=4)
+def _placeholders(rules_path):
+    # rules run one after another over the rewritten text, so a later rule sees earlier placeholders
+    # (and a second pass the first one's): `secret:bearer_token` would read as an api_key_assignment.
+    # Only this rule set's own names: a made-up `[REDACTED:secret:<a real key>]` is still raw text.
+    names = "|".join(re.escape(f"{category}:{name}") for category, name, _, _ in _rules(rules_path))
+    return re.compile(rf"\[REDACTED:(?:{names})\]")
+
+
+def _replacer(category, name, validator, placeholders):
     token = f"[REDACTED:{category}:{name}]"
-    if validator is None:
-        return token
+    starts = [start for start, _ in placeholders]
 
     def _replace(match):
-        return token if validator(match.group(0)) else match.group(0)
+        i = bisect.bisect_right(starts, match.start()) - 1  # placeholders never overlap: one candidate
+        if i >= 0 and match.end() <= placeholders[i][1]:
+            return match.group(0)  # inside an existing placeholder: not raw text
+        if validator is not None and not validator(match.group(0)):
+            return match.group(0)
+        return token
 
     return _replace
 
@@ -63,7 +77,8 @@ def redact(text, rules_path=None):
     out = text
     key = str(rules_path) if rules_path else str(config.REDACTION_RULES)
     for category, name, rx, validator in _rules(key):
-        out = rx.sub(_replacer(category, name, validator), out)
+        placeholders = [m.span() for m in _placeholders(key).finditer(out)]
+        out = rx.sub(_replacer(category, name, validator, placeholders), out)
     return out
 
 
