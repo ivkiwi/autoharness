@@ -94,9 +94,10 @@ def test_existing_global_skill_is_neither_archived_recalled_nor_counted(roots, m
 
 
 def test_global_names_do_not_block_project_skill_resolution(roots, monkeypatch):
-    for level in layer.LAYERS:
-        assert promoter.promote(_create(level), roots=roots)["ok"]
+    # a global foo from before the switch, then a project foo once global is disabled
+    assert promoter.promote(_create(layer.GLOBAL), roots=roots)["ok"]
     monkeypatch.setattr(config, "DISABLE_GLOBAL", True, raising=False)
+    assert promoter.promote(_create(layer.PROJECT), roots=roots)["ok"]
 
     assert on_skill_call.on_skill_call({"skill_name": "foo"}, roots=roots)["level"] == layer.PROJECT
     assert sidecar.read(layer.PROJECT, "foo", roots[layer.PROJECT])["use"] == 1
