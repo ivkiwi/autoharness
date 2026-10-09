@@ -150,3 +150,11 @@ def test_a_baseline_that_moved_is_a_conflict(canon_foo, monkeypatch):
     monkeypatch.setattr(release, "publish", moved)
     _queue_patch()
     assert gate.run_once(Fake())["decision"] == "conflict"
+
+
+def test_an_unreadable_protection_list_stops_the_pass_without_deciding(canon_foo):
+    (config.CANON_ROOT / ".skill-lock.json").write_text("{not json")
+    _queue_patch()
+    fake = Fake()
+    assert gate.run_once(fake) is None
+    assert _decisions() == [] and fake.calls == []

@@ -5,6 +5,7 @@ the canon registry allows, and carrying no authority-class content. Anything els
 `out_of_phase`: kept in the queue for a later phase, put in front of no one.
 """
 import json
+import re
 
 from autoharness import config
 from autoharness.canon import release
@@ -14,15 +15,45 @@ PHASE1_ACTIONS = ("create", "update", "patch")
 # a rejection the gate may still take over: the promoter only refused to write somewhere it does not own
 _TAKEOVER = {"self_produced"}
 _GLOBAL_OFF = "AUTOHARNESS_DISABLE_GLOBAL"
+# What a skill must never grant on its own: approval bypasses, privilege, outward sends, spending,
+# deletion, secrets, and the agents' own rules. Judged on the lines a change adds, so a skill that
+# already talks about Slack can still be patched; a hit is out of phase, never a silent pass.
+AUTHORITY = [re.compile(p, re.I) for p in (
+    r"without\s+(asking|confirm\w*|approval|consent|checking)",
+    r"\b(skip|bypass|disable|ignore|override)\s+(the\s+|any\s+|all\s+)?"
+    r"(confirmation|approval|review|permission|sandbox|safety|guard|gate)",
+    r"\bauto(matically)?[\s-]+(approve|merge|publish|deploy|send|commit|push|accept)",
+    r"\b(don'?t|do not|no need to|never)\s+ask\b",
+    r"\bsudo\b|--dangerously|\bchmod\s+(777|[ugoa]*\+s)",
+    r"\b(ufw|iptables|firewall|launchctl|crontab)\b",
+    r"\b(send|post|publish|e-?mail|message|reply)\b.{0,40}\b(slack|telegram|e-?mail|channel|customer|client|public)\b",
+    r"\b(pay|purchase|buy|charge|spend)\b|\btransfer\s+(money|funds)\b",
+    r"\b(delete|drop|wipe|purge|destroy|truncate)\b|force[\s-]push",
+    r"\b(token|password|secret|api[\s_-]?key|credential)s?\b",
+    r"\b(agents\.md|claude\.md|system\s+prompt|identity|persona)\b",
+)]
+
+
+class PolicyError(Exception):
+    """A protection list exists but cannot be read: the pass stops rather than guess it empty."""
 
 
 def _names(path, key):
+    if not path.exists():
+        return set()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return set()
-    items = data.get(key, {}) if isinstance(data, dict) else {}
-    return set(items) if isinstance(items, (dict, list)) else set()
+    except (OSError, ValueError) as exc:
+        raise PolicyError(f"{path}: {exc}") from exc
+    items = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(items, (dict, list)):
+        raise PolicyError(f"{path}: no {key!r} list")
+    return set(items)
+
+
+def _added(baseline, body):
+    old = set(baseline.splitlines())
+    return "\n".join(line for line in body.splitlines() if line not in old)
 
 
 def protected():
@@ -77,10 +108,13 @@ def classify(row):
             return "out_of_phase", "name_taken"
     elif not _live(entry):
         return "out_of_phase", "not_canon"
+    elif release.has_links(entry.resolve()):
+        return "out_of_phase", "links"
     try:
         body = candidate_body(intent)
     except (KeyError, ValueError) as exc:
         return "out_of_phase", f"delta:{exc}"
-    if skills_guard.scan(body):
+    baseline = "" if action == "create" else skill_store.read_body("global", name, config.CANON_ROOT) or ""
+    if skills_guard.scan(body) or any(p.search(_added(baseline, body)) for p in AUTHORITY):
         return "out_of_phase", "authority"
     return "eligible", body

@@ -1,11 +1,13 @@
 """Canon releases: an immutable tree per version under skill-releases/<name>/<sha>, and one entry per
-skill in skills/ that harnesses discover. Publishing switches that entry to a release symlink.
+skill in skills/ that harnesses discover. Publishing and rolling back both switch that entry.
 
-Every switch is compare-and-swap against the tree the candidate was evaluated on, and is journalled
-`prepared` before it touches skills/ and `committed` (or `aborted`) after a readback. A crash at any
-point leaves a prepared record that recover() settles from what is actually on disk: the switch either
-completed (commit it) or it did not (put the previous entry back). A real canon directory is moved out
-of skills/ into GATE_DIR/displaced, never deleted, so its first publish is recoverable too.
+A switch is one transaction under release.lock: settle any switch a crash left open, freeze both
+ends as releases (so a rollback can only ever land on a hash-verified tree), compare-and-swap the
+live entry against the expected state right before touching it, journal `prepared` with everything
+recovery needs (including where a real canon directory will be moved), switch, read back, journal
+`committed`. A real canon directory is moved to GATE_DIR/displaced, never deleted. Recovery only
+touches an entry that is still in one of the states its own transaction can leave; anything else is
+someone else's change and is reported as a conflict, not overwritten.
 """
 import hashlib
 import json
@@ -13,13 +15,14 @@ import os
 import shutil
 import stat
 import time
+from pathlib import Path
 
 from autoharness import config
 from autoharness.lib import lock
 
 
 class Conflict(Exception):
-    """The live entry is not the tree the candidate was evaluated against."""
+    """The live entry is not in the state the switch was planned against."""
 
 
 def skills_dir():
@@ -48,11 +51,17 @@ def tree_sha256(root):
     return digest.hexdigest()
 
 
+def has_links(root):
+    # the hash skips symlinks and a copy would follow them: a tree with any is out of scope, not guessed at
+    return any(p.is_symlink() for p in root.rglob("*"))
+
+
 def current(name):
-    """(kind, target, sha) of the live entry: kind is absent, dir or link."""
+    """(kind, target, sha) of the live entry: kind is absent, dir or link (a dangling link has sha None)."""
     entry = skills_dir() / name
     if entry.is_symlink():
-        return "link", os.readlink(entry), tree_sha256(entry.resolve()) if entry.resolve().is_dir() else None
+        resolved = entry.resolve()
+        return "link", os.readlink(entry), tree_sha256(resolved) if resolved.is_dir() else None
     if entry.is_dir():
         return "dir", None, tree_sha256(entry)
     if entry.exists():
@@ -70,7 +79,7 @@ def journal_entries():
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(entry, dict):
+        if isinstance(entry, dict) and isinstance(entry.get("op"), str):
             out.append(entry)
     return out
 
@@ -78,44 +87,59 @@ def journal_entries():
 def _record(entry):
     p = _journal()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({**entry, "at": time.time()}, ensure_ascii=False) + "\n")
+    with p.open("a+b") as f:
+        f.seek(0, 2)
+        if f.tell():
+            f.seek(-1, 2)
+            torn = f.read(1) != b"\n"
+        else:
+            torn = False
+        line = json.dumps({**entry, "at": time.time()}, ensure_ascii=False) + "\n"
+        f.write((b"\n" if torn else b"") + line.encode("utf-8"))  # a torn tail must not swallow this record
         f.flush()
         os.fsync(f.fileno())
 
 
 def _read_only(root):
-    for path in [root, *root.rglob("*")]:
-        if not path.is_symlink():
-            mode = path.stat().st_mode
-            path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    for path in [*root.rglob("*"), root]:
+        path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
+def _writable(root):
+    return any(p.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH) for p in [root, *root.rglob("*")])
 
 
 def freeze(name, tree):
-    """Copy a tree into skill-releases/<name>/<sha> once (tmp + rename) and make it read-only."""
+    """skill-releases/<name>/<sha>: copied once, read-only before it gets its final name, re-verified."""
+    if has_links(tree):
+        raise Conflict(f"{tree} contains symlinks")
     sha = tree_sha256(tree)
     dest = releases_dir() / name / sha
     if not dest.exists():
         tmp = dest.with_name(f".{sha}.{os.getpid()}.tmp")
-        shutil.rmtree(tmp, ignore_errors=True)
-        shutil.copytree(tree, tmp, symlinks=False)
+        if tmp.exists():
+            for p in [tmp, *tmp.rglob("*")]:
+                p.chmod(p.stat().st_mode | stat.S_IWUSR)
+            shutil.rmtree(tmp)
+        shutil.copytree(tree, tmp)
+        _read_only(tmp)
         os.rename(tmp, dest)
-        _read_only(dest)
-    if tree_sha256(dest) != sha:
+    if has_links(dest) or tree_sha256(dest) != sha:
         raise Conflict(f"release {dest} does not match its name")
-    return dest, sha
+    if _writable(dest):
+        _read_only(dest)  # a release made by an older copy that died before chmod
+    return str(dest), sha
+
+
+def _state(name):
+    kind, target, sha = current(name)
+    return {"kind": kind, "target": target, "sha": sha}
 
 
 def _displaced_path(name):
     dest = config.GATE_DIR / "displaced" / f"{name}-{time.time_ns()}"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    return dest
-
-
-def _displace(name):
-    dest = _displaced_path(name)
-    os.rename(skills_dir() / name, dest)
-    return dest
+    return str(dest)
 
 
 def _point(name, target):
@@ -126,86 +150,111 @@ def _point(name, target):
     os.replace(tmp, skills_dir() / name)
 
 
+def _switch(op, name, expect, to, event_id, **extra):
+    """Move skills/<name> from the `expect` state to `to` ({'target','sha'} or None for absent).
+    The caller holds the lock and has settled open switches."""
+    live = _state(name)
+    if live != expect:
+        raise Conflict(f"{name}: live entry {live} is not the expected {expect}")
+    tx = {"op": "prepared", "tx": f"{event_id}:{time.time_ns()}", "kind": op, "event_id": event_id,
+          "name": name, "prev": live, "to": to, **extra}  # tx: unique per attempt, a retry is a new one
+    # a directory can only leave by moving; a link only has to move when nothing replaces it
+    if live["kind"] == "dir" or (live["kind"] == "link" and to is None):
+        tx["displaced"] = _displaced_path(name)  # journalled before the move: a crash right after still finds it
+    _record(tx)
+    skills_dir().mkdir(parents=True, exist_ok=True)
+    if tx.get("displaced"):
+        os.rename(skills_dir() / name, tx["displaced"])
+    if to is not None:
+        _point(name, to["target"])
+    if not _arrived(tx):
+        _restore(tx)
+        _record({**tx, "op": "aborted", "reason": "readback"})
+        raise Conflict(f"{name}: readback after the switch does not match {to}")
+    committed = {**tx, "op": "committed"}
+    _record(committed)
+    return committed
+
+
+def _arrived(tx):
+    live = _state(tx["name"])
+    if tx["to"] is None:
+        return live["kind"] == "absent"
+    return live["kind"] == "link" and live["target"] == tx["to"]["target"] and live["sha"] == tx["to"]["sha"]
+
+
+def _untouched(tx):
+    """The entry is still where this transaction found it, or halfway through this transaction's own move."""
+    live, prev = _state(tx["name"]), tx["prev"]
+    if live == prev:
+        return True
+    return live["kind"] == "absent" and bool(tx.get("displaced")) and os.path.lexists(tx["displaced"])
+
+
+def _restore(tx):
+    entry = skills_dir() / tx["name"]
+    if tx["to"] is not None and entry.is_symlink() and os.readlink(entry) == tx["to"]["target"]:
+        entry.unlink()  # our own new link; the release it points at stays
+    if not os.path.lexists(entry) and tx.get("displaced") and os.path.lexists(tx["displaced"]):
+        os.rename(tx["displaced"], entry)  # the previous entry goes back exactly as it was
+    elif not os.path.lexists(entry) and tx["prev"]["kind"] == "link":
+        _point(tx["name"], tx["prev"]["target"])
+
+
+def _recover_locked():
+    settled = []
+    entries = journal_entries()
+    closed = {e.get("tx") for e in entries if e.get("op") in ("committed", "aborted", "conflict")}
+    for tx in [e for e in entries if e.get("op") == "prepared" and e.get("tx") not in closed]:
+        if _arrived(tx):
+            _record({**tx, "op": "committed", "recovered": True})
+        elif _untouched(tx):
+            _restore(tx)
+            _record({**tx, "op": "aborted", "recovered": True})
+        else:  # changed by someone else since: report it, never overwrite it
+            _record({**tx, "op": "conflict", "recovered": True, "live": _state(tx["name"])})
+        settled.append(tx["tx"])
+    return settled
+
+
+def recover():
+    """Settle every switch that never committed or aborted, from the state on disk."""
+    with _lock():
+        return _recover_locked()
+
+
 def publish(name, candidate, *, expect_sha, event_id):
     """Switch skills/<name> to a frozen copy of candidate, only if the live tree is still expect_sha
     (None: the name must be absent). Returns the committed journal entry."""
     with _lock():
-        kind, target, sha = current(name)
-        if sha != expect_sha:
-            raise Conflict(f"{name}: live tree {sha} is not the evaluated baseline {expect_sha}")
-        release, new_sha = freeze(name, candidate)
-        prev = target if kind == "link" else (str(freeze(name, skills_dir() / name)[0]) if kind == "dir" else None)
-        base = {"event_id": event_id, "name": name, "prev_kind": kind, "prev": prev,
-                "new": str(release), "new_sha": new_sha, "baseline_sha": expect_sha}
-        if kind == "dir":  # journalled before the move, so a crash right after it still knows where it went
-            base["displaced"] = str(_displaced_path(name))
-        _record({"op": "prepared", **base})
-        skills_dir().mkdir(parents=True, exist_ok=True)
-        if kind == "dir":
-            os.rename(skills_dir() / name, base["displaced"])
-        _point(name, release)
-        if current(name)[2] != new_sha:
-            _restore(base)
-            _record({"op": "aborted", **base, "reason": "readback"})
-            raise Conflict(f"{name}: readback after the switch does not match {new_sha}")
-        committed = {"op": "committed", **base}
-        _record(committed)
-        return committed
+        _recover_locked()
+        live = _state(name)
+        if live["sha"] != expect_sha or (expect_sha is None and live["kind"] != "absent"):
+            raise Conflict(f"{name}: live entry {live} is not the evaluated baseline {expect_sha}")
+        target, sha = freeze(name, candidate)
+        # the baseline is frozen too, so a rollback lands on a verified copy even if the original moves
+        frozen = freeze(name, skills_dir() / name) if live["kind"] != "absent" else None
+        baseline = {"target": frozen[0], "sha": frozen[1]} if frozen else None
+        return _switch("publish", name, live, {"target": target, "sha": sha}, event_id, baseline=baseline)
 
 
 def _last_committed(name):
     for entry in reversed(journal_entries()):
-        if entry.get("name") == name and entry.get("op") in ("committed", "rolled_back"):
+        if entry.get("name") == name and entry.get("op") == "committed":
             return entry
     return None
 
 
 def rollback(name):
-    """Point skills/<name> back at what the last publish replaced; a created skill is moved out."""
+    """Point skills/<name> back at the frozen baseline the last publish replaced (a create: move it out)."""
     with _lock():
+        _recover_locked()
         last = _last_committed(name)
-        if not last or last["op"] != "committed":
-            raise Conflict(f"{name}: no committed publish to roll back")
-        kind, target, _ = current(name)
-        if kind != "link" or target != last["new"]:
-            raise Conflict(f"{name}: live entry is not the last publish ({last['new']})")
-        if last["prev"] is None:
-            dest = _displace(name)
-            _record({"op": "rolled_back", "name": name, "from": last["new"], "to": None, "displaced": str(dest)})
-        else:
-            _point(name, last["prev"])
-            _record({"op": "rolled_back", "name": name, "from": last["new"], "to": last["prev"]})
-        return current(name)
-
-
-def recover():
-    """Settle every prepared switch that never committed or aborted, from the state on disk."""
-    settled = []
-    with _lock():
-        entries = journal_entries()
-        done = {e.get("event_id") for e in entries if e.get("op") in ("committed", "aborted")}
-        open_ = {}
-        for e in entries:
-            if e.get("op") == "prepared" and e.get("event_id") not in done:
-                open_[e["event_id"]] = e
-        for event, e in open_.items():
-            kind, target, sha = current(e["name"])
-            if kind == "link" and target == e["new"] and sha == e["new_sha"]:
-                _record({**e, "op": "committed", "recovered": True})
-            else:
-                _restore(e)
-                _record({**e, "op": "aborted", "recovered": True})
-            settled.append(event)
-    return settled
-
-
-def _restore(e):
-    """Put skills/<name> back to what it was before the prepared switch e."""
-    entry = skills_dir() / e["name"]
-    if entry.is_symlink() and os.readlink(entry) != e.get("prev"):
-        entry.unlink()  # the new (or a half-made) link; the release it points at stays
-    if e["prev_kind"] == "dir":
-        if e.get("displaced") and not entry.exists() and not entry.is_symlink():
-            os.rename(e["displaced"], entry)  # the canon dir goes back exactly as it was
-    elif e["prev_kind"] == "link" and not entry.is_symlink():
-        _point(e["name"], e["prev"])
+        if not last or last.get("kind") != "publish":
+            raise Conflict(f"{name}: no publish to roll back")
+        expect = {"kind": "link", "target": last["to"]["target"], "sha": last["to"]["sha"]}
+        to = last["baseline"]
+        if to is not None and (not os.path.isdir(to["target"]) or has_links(Path(to["target"]))
+                               or tree_sha256(Path(to["target"])) != to["sha"]):
+            raise Conflict(f"{name}: frozen baseline {to['target']} is missing or changed")
+        return _switch("rollback", name, expect, to, f"rollback-{last['event_id']}")

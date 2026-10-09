@@ -243,7 +243,8 @@ def evaluate(row, body, runner=claude_runner):
     stage.mkdir(parents=True, exist_ok=True)
     (stage / "SKILL.md").write_text(body, encoding="utf-8")
     committed = release.publish(name, stage, expect_sha=base_sha, event_id=row["id"])
-    return _decide(row, "published", cases_sha=_digest(cases), release=committed["new"], prev=committed["prev"])
+    return _decide(row, "published", cases_sha=_digest(cases), release=committed["to"]["target"],
+                   baseline=committed["baseline"])
 
 
 def run_once(runner=claude_runner):
@@ -255,7 +256,10 @@ def run_once(runner=claude_runner):
         for row in queue.read():
             if row["id"] in decided:
                 continue
-            status, detail = select.classify(row)
+            try:
+                status, detail = select.classify(row)
+            except select.PolicyError:
+                return None  # a protection list is unreadable: decide nothing until it is fixed
             if status == "out_of_phase":
                 _decide(row, "out_of_phase", reason=detail)
                 continue

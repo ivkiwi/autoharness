@@ -23,8 +23,11 @@ def redaction_version():
     return hashlib.sha256(config.REDACTION_RULES.read_bytes()).hexdigest()[:16]
 
 
-def event_id(provenance, intent):
-    key = {"provenance": {k: provenance.get(k) for k in _PROVENANCE_KEYS}, "intent": intent}
+def event_id(provenance, intent, run_id=None, project_root=None):
+    # run and project are part of the event: one curator pass in two projects is two events, while a
+    # crash replay of the same run in the same project hashes the same and is dropped
+    key = {"provenance": {k: provenance.get(k) for k in _PROVENANCE_KEYS}, "intent": intent,
+           "run_id": run_id, "project_root": str(project_root) if project_root else None}
     return hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -44,7 +47,8 @@ def append(run_id, intents, verdicts, *, provenance=None, project_root=None):
         with p.open("a", encoding="utf-8") as f:
             f.write("\n" if torn else "")
             for intent, verdict in zip(intents, verdicts, strict=True):
-                f.write(json.dumps({"id": event_id(prov, intent), "at": time.time(), "run_id": run_id,
+                f.write(json.dumps({"id": event_id(prov, intent, run_id, project_root), "at": time.time(),
+                                    "run_id": run_id,
                                     "project_root": str(project_root) if project_root else None,
                                     "provenance": prov, "intent": intent, "verdict": verdict},
                                    ensure_ascii=False) + "\n")
@@ -66,8 +70,9 @@ def read():
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(row, dict) or not isinstance(row.get("intent"), dict) or row.get("id") in seen:
-                continue
+            if not (isinstance(row, dict) and isinstance(row.get("id"), str) and isinstance(row.get("intent"), dict)
+                    and isinstance(row.get("verdict"), dict)) or row["id"] in seen:
+                continue  # a foreign or torn envelope is skipped before it can be deduplicated
             seen.add(row["id"])
             rows.append(row)
     return sorted(rows, key=lambda r: r.get("at", 0))
