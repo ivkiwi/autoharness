@@ -157,6 +157,7 @@ configure unless you want to change the pace.
 | `AUTOHARNESS_CODEX_BIN` / `AUTOHARNESS_CODEX_MODEL` | `codex` / `gpt-6.1-sol` | The Codex carrier: executable and model (empty = the model Codex is configured with). |
 | `AUTOHARNESS_REFLECTOR_EFFORT` / `AUTOHARNESS_CURATOR_EFFORT` | `high` / `xhigh` | Effort of the reflector and the curator in both harnesses (Claude: `--effort`, the model comes from the agent file, `opus`; Codex: `model_reasoning_effort`). |
 | `AUTOHARNESS_GATE_PLANNER_EFFORT` / `AUTOHARNESS_GATE_REPLAY_EFFORT` | `high` / `medium` | Effort of the canon gate's case planner and replay. |
+| `AUTOHARNESS_GLOBAL_ROOT` | _(unset)_ | Replaces `~/.claude` (`~/.codex` under Codex) as the global layer's root. Unset or blank is stock behaviour — the real home. Set it when autoharness itself has to run sandboxed (a pinned clone, CI, an evaluation harness) and the production skills library must stay untouched. The project layer is unaffected. |
 
 **Cadence — when it learns**
 

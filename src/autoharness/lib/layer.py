@@ -40,6 +40,10 @@ if HARNESS not in HOST_DIRS:
 def host_dir():
     return HOST_DIRS[HARNESS]
 
+# Read inside default_root, not at import: every other layer path is derived per call, so pinning this
+# to import time would make the override invisible to tests that set it with monkeypatch.setenv.
+GLOBAL_ROOT_ENV = "AUTOHARNESS_GLOBAL_ROOT"
+
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -95,6 +99,13 @@ def default_root(layer, cwd=None):
     CLAUDE_PROJECT_DIR instead, so its callers leave it unset."""
     _check_layer(layer)
     if layer == GLOBAL:
+        # the global layer is the only one that reaches outside the project; AUTOHARNESS_GLOBAL_ROOT
+        # redirects it so a sandboxed install (pinned clone, CI, an evaluation harness) never reads or
+        # writes the real home. Blank (an empty / whitespace-only `AUTOHARNESS_GLOBAL_ROOT=` left in a
+        # settings block) is stock behaviour: resolving "" to the cwd would re-root it on the project.
+        override = os.environ.get(GLOBAL_ROOT_ENV, "").strip()
+        if override:
+            return Path(override).expanduser()
         return Path.home() / host_dir()
     pinned = os.environ.get(PROJECT_ROOT_ENV)
     if pinned:
