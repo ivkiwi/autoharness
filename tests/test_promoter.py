@@ -1,5 +1,7 @@
+import errno
 import json
 import os
+import sys
 import threading
 import time
 
@@ -198,6 +200,16 @@ def test_create_never_replaces_a_user_file_at_the_skill_path(tmp_path):
     v = promoter.promote(_create(), roots=roots)  # rejected, not a crash out of the drain
     assert not v["ok"] and "self_produced" in _families(v)
     assert (skills / "foo").read_text() == "a user's note\n"
+
+
+def test_create_is_not_blocked_by_file_manager_debris(tmp_path):
+    # Finder drops .DS_Store into a dir a crashed create left behind; that must not lock the name forever
+    roots = _roots(tmp_path)
+    left = layer.symbol_dir("project", "foo", roots["project"])
+    left.mkdir(parents=True)
+    (left / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    v = promoter.promote(_create(), roots=roots)
+    assert v["ok"], v["findings"]
 
 
 def test_create_never_writes_into_a_handwritten_skill_dir(tmp_path):
@@ -650,6 +662,55 @@ def test_drain_crash_verdict_for_an_intent_that_raises(tmp_path, monkeypatch):
     assert intent_queue.read("r1", proot) == []
 
 
+def test_drain_accounts_an_oserror_that_belongs_to_the_intent(tmp_path, monkeypatch):
+    # a read-only skill dir, a name the filesystem refuses: it would fail on every Stop, so account it
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("r1", _create(), proot)
+
+    def denied(*a, **k):
+        raise PermissionError(errno.EACCES, "Permission denied", "references")
+    monkeypatch.setattr(promoter, "promote", denied)
+    verdicts = promoter.drain("r1", roots=roots)
+    assert verdicts[0]["findings"][0][0] == "crash" and "PermissionError" in verdicts[0]["findings"][0][1]
+    assert intent_queue.read("r1", proot) == []
+
+
+@pytest.mark.parametrize("winerror, kept", [(32, True), (33, True), (19, True), (23, True), (29, True),
+                                             (30, True), (108, True), (5, False), (65, False)])
+def test_windows_eacces_is_split_by_its_native_code(tmp_path, monkeypatch, winerror, kept):
+    # Windows folds sharing/lock and device/media failures into EACCES; only a real denial is final
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("r1", _create(), proot)
+
+    def fail(*a, **k):
+        exc = PermissionError(errno.EACCES, "Windows error")
+        exc.winerror = winerror
+        raise exc
+    monkeypatch.setattr(promoter, "promote", fail)
+    if kept:
+        with pytest.raises(PermissionError):
+            promoter.drain("r1", roots=roots)
+    else:
+        assert promoter.drain("r1", roots=roots)[0]["findings"][0][0] == "crash"
+    assert bool(intent_queue.read("r1", proot)) is kept
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="NAME_MAX semantics are POSIX")
+def test_drain_does_not_wedge_on_a_name_the_filesystem_refuses(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    long_name = "a" * 256  # passes the name regex, exceeds NAME_MAX
+    intent_queue.append("r1", _create(), proot)
+    intent_queue.append("r1", _create(name=long_name, body=GOOD_BODY.replace("name: foo", f"name: {long_name}")), proot)
+    intent_queue.append("r1", _create(name="bar", body=GOOD_BODY.replace("name: foo", "name: bar")), proot)
+    verdicts = promoter.drain("r1", roots=roots)
+    assert [v["ok"] for v in verdicts] == [True, False, True]
+    assert skill_store.exists("project", "bar", proot)
+    assert intent_queue.read("r1", proot) == []
+
+
 def test_drain_keeps_the_queue_on_an_environmental_error(tmp_path, monkeypatch):
     roots = _roots(tmp_path)
     proot = roots["project"]
@@ -709,3 +770,37 @@ def test_create_in_the_same_layer_is_not_blocked_by_the_other_layer_check(tmp_pa
     roots = _roots(tmp_path)
     assert promoter.promote(_create(level="project"), roots=roots)["ok"]
     assert promoter.promote(_create(level="project"), roots=roots)["ok"]  # crash replay stays idempotent
+
+
+def test_create_checks_the_other_layer_even_with_global_disabled(tmp_path, monkeypatch):
+    # disabling global stops writes there; flipping it back must not reveal an ambiguous name
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    monkeypatch.setattr(promoter.config, "DISABLE_GLOBAL", True)
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)
+
+
+def test_create_with_an_unusable_name_is_rejected_cleanly(tmp_path):
+    roots = _roots(tmp_path)
+    for bad in ["a" * 256, "con"]:
+        v = promoter.promote(_create(name=bad, body=GOOD_BODY.replace("name: foo", f"name: {bad}")), roots=roots)
+        assert not v["ok"] and "shape" in _families(v), bad
+
+
+def test_update_can_still_rewrite_an_existing_legacy_subfile(tmp_path):
+    # the new-name limits are for names being created; an existing over-long subfile stays updatable
+    roots = _roots(tmp_path)
+    legacy_rel = "references/" + "n" * 104 + ".md"  # portable: no reserved device name involved
+    body = GOOD_BODY + f"See {legacy_rel} for the notes\n"
+    assert promoter.promote(_create(body=GOOD_BODY), roots=roots)["ok"]
+    legacy = layer.symbol_dir("project", "foo", roots["project"]) / legacy_rel
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("old\n")
+    upd = {"action": "update", "name": "foo", "body": body, "files": {legacy_rel: "new\n"},
+           "reason": "r", "evidence": "e"}
+    v = promoter.promote(upd, roots=roots)
+    assert v["ok"], v["findings"]
+    fresh = "references/" + "m" * 104 + ".md"
+    bad = {**upd, "files": {fresh: "x\n"}, "body": GOOD_BODY + f"See {fresh} for the notes\n"}
+    assert "files" in _families(promoter.promote(bad, roots=roots))  # a new over-long name is still refused

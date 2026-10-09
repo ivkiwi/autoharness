@@ -408,3 +408,17 @@ def test_non_string_fields_are_rejected_at_stage_time(tmp_path):
                {"body": {"not": "text"}}, {"level": 1}):
         v = server.stage(_params(**kw), run_id=RUN, root=tmp_path)
         assert not v["ok"] and "schema" in _errs(v), kw
+
+
+def test_unusable_names_are_rejected_at_stage_time(tmp_path):
+    # the model hears it while it can still rename, instead of a promoter verdict it never reads
+    for bad in ["a" * 101, "../escape", "con"]:
+        v = server.stage(_params(name=bad), run_id=RUN, root=tmp_path)
+        assert not v["ok"] and "schema" in _errs(v), bad
+
+
+def test_existing_unusual_names_can_still_be_updated(tmp_path):
+    # the new-name limits apply to create only; a legacy skill named `con` can still be maintained
+    v = server.stage(_params(action="patch", name="con", body=None, old_string="a", new_string="b"),
+                     run_id=RUN, root=tmp_path)
+    assert v["ok"], v["errors"]

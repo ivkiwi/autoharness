@@ -94,10 +94,12 @@ def test_existing_global_skill_is_neither_archived_recalled_nor_counted(roots, m
 
 
 def test_global_names_do_not_block_project_skill_resolution(roots, monkeypatch):
-    # a global foo from before the switch, then a project foo once global is disabled
-    assert promoter.promote(_create(layer.GLOBAL), roots=roots)["ok"]
+    # namesakes in both layers (a create refuses to make them, but a user or an older version can):
+    # with global disabled, the project one is the one that resolves and counts
+    for lyr in layer.LAYERS:
+        skill_store.write_body(lyr, "foo", _create(lyr)["body"], roots[lyr])
+        sidecar.create(lyr, "foo", 0, roots[lyr])
     monkeypatch.setattr(config, "DISABLE_GLOBAL", True, raising=False)
-    assert promoter.promote(_create(layer.PROJECT), roots=roots)["ok"]
 
     assert on_skill_call.on_skill_call({"skill_name": "foo"}, roots=roots)["level"] == layer.PROJECT
     assert sidecar.read(layer.PROJECT, "foo", roots[layer.PROJECT])["use"] == 1

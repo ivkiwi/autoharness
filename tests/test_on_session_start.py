@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 
@@ -317,3 +318,14 @@ def test_child_session_start_touches_nothing(tmp_path, monkeypatch):
     assert out["context"] is None and out["archived"] == {}
     assert (state / "last_run.json").exists()  # the user still gets the summary
     assert skill_store.exists("project", "dead", roots["project"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows refuses to create a directory named con")
+def test_a_users_skill_with_a_windows_reserved_name_does_not_break_session_start(tmp_path):
+    roots = _roots(tmp_path)
+    _seed_desc(roots, "foo", "use when testing the index")
+    user = roots["project"] / "skills" / "con"
+    user.mkdir(parents=True)
+    (user / "SKILL.md").write_text("---\nname: con\ndescription: mine\n---\nb")
+    out = on_session_start.on_session_start(roots=roots)
+    assert "- foo [project]" in out["context"]
