@@ -112,6 +112,13 @@ def _ours(d):
         return False  # unreadable: not something we can tell is ours
 
 
+def _listing(d):
+    try:
+        return list(d.iterdir())
+    except OSError:
+        return []  # an unreadable dir: nothing to sweep there, and the drain must still run
+
+
 def sweep_orphans(lyr, root=None):
     skills = layer.skills_dir(lyr, root)
     if not skills.exists():
@@ -120,7 +127,7 @@ def sweep_orphans(lyr, root=None):
     cutoff = time.time() - ORPHAN_TMP_MIN_AGE_S
     archive = layer.archive_dir(lyr, root)
     linked = archive.is_symlink()  # a linked .archive leads outside the layer: never walk it
-    dirs = [*skills.iterdir(), *(archive.iterdir() if archive.is_dir() and not linked else [])]
+    dirs = [*_listing(skills), *(_listing(archive) if archive.is_dir() and not linked else [])]
     for tmp in (t for d in dirs if _ours(d) for t in d.rglob("*.tmp")):
         try:
             if tmp.stat().st_mtime > cutoff:

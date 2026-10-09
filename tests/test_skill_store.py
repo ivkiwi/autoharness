@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 
 import pytest
@@ -141,3 +142,19 @@ def test_sweep_orphans_skips_odd_metadata_instead_of_failing(tmp_path):
         (d / ".sidecar.json").write_text(meta)
         _aged(d / "x.tmp")
     assert skill_store.sweep_orphans("project", tmp_path) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, non-root")
+def test_sweep_orphans_survives_an_unreadable_archive(tmp_path):
+    skills = layer.skills_dir("project", tmp_path)
+    ours = skills / "ours"
+    ours.mkdir(parents=True)
+    (ours / ".sidecar.json").write_text('{"created_by": "agent"}')
+    gone = _aged(ours / "x.tmp")
+    archive = layer.archive_dir("project", tmp_path)
+    archive.mkdir()
+    archive.chmod(0)
+    try:
+        assert skill_store.sweep_orphans("project", tmp_path) == [gone]
+    finally:
+        archive.chmod(0o755)
