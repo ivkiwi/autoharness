@@ -17,6 +17,7 @@ A reflector/curator child session skips all of this: spawn pins the parent's res
 import os
 import re
 import subprocess
+import warnings
 from functools import cache
 from pathlib import Path
 
@@ -25,6 +26,19 @@ PROJECT = "project"
 LAYERS = (GLOBAL, PROJECT)
 # set by spawn on child sessions: already the project layer root (<repo>/.claude), not the repo dir
 PROJECT_ROOT_ENV = "AUTOHARNESS_PROJECT_ROOT"
+# which host runs the hooks: it decides the dot-directory every root hangs off (`~/.claude` and
+# `<repo>/.claude`, or `~/.codex` and `<repo>/.codex`), so two harnesses on one repo never share
+# counters, queues or skills. Set by the hook command; the default is the plugin host.
+HARNESS_ENV = "AUTOHARNESS_HARNESS"
+HOST_DIRS = {"claude": ".claude", "codex": ".codex"}
+HARNESS = os.environ.get(HARNESS_ENV, "claude").strip().lower() or "claude"
+if HARNESS not in HOST_DIRS:
+    warnings.warn(f"{HARNESS_ENV}={HARNESS!r} is not one of {sorted(HOST_DIRS)}; using claude", stacklevel=1)
+    HARNESS = "claude"
+
+
+def host_dir():
+    return HOST_DIRS[HARNESS]
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -76,14 +90,16 @@ def _main_worktree_root_resolved(cwd):
     return Path(cwd)
 
 
-def default_root(layer):
+def default_root(layer, cwd=None):
+    """`cwd` is the session directory a host reports in its hook payload; Claude pins it in
+    CLAUDE_PROJECT_DIR instead, so its callers leave it unset."""
     _check_layer(layer)
     if layer == GLOBAL:
-        return Path.home() / ".claude"
+        return Path.home() / host_dir()
     pinned = os.environ.get(PROJECT_ROOT_ENV)
     if pinned:
         return Path(pinned)
-    return _main_worktree_root(os.environ.get("CLAUDE_PROJECT_DIR") or str(Path.cwd())) / ".claude"
+    return _main_worktree_root(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or str(Path.cwd())) / host_dir()
 
 
 def _root(layer, root):

@@ -47,14 +47,45 @@ from autoharness.hook import (  # noqa: E402
     on_stop,
     promoter,
 )
-from autoharness.lib import counters, layer  # noqa: E402
+from autoharness.lib import counters, layer, tails  # noqa: E402
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
-_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch")  # Claude names; Codex reports its shell as Bash and patches as apply_patch
 
 
-def _roots(roots):
-    return roots or {lyr: layer.default_root(lyr) for lyr in layer.LAYERS}
+def _roots(roots, cwd=None):
+    if roots:
+        return roots
+    cwd = cwd if layer.HARNESS == "codex" else None  # Codex carries the session dir in the payload; Claude pins CLAUDE_PROJECT_DIR
+    return {lyr: layer.default_root(lyr, cwd=cwd) for lyr in layer.LAYERS}
+
+
+def _primary_session(event):
+    """Codex runs its subagents as rollouts of their own, with the same hooks; one of those must
+    neither count nor reflect. The payload carries no marker, the rollout's first record does
+    (session_meta.source = {"subagent": ...}). No transcript: the env guard decides, not this."""
+    if layer.HARNESS != "codex":
+        return True
+    path = event.get("transcript_path")
+    if not path:
+        return True
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            source = ((json.loads(f.readline() or "{}") or {}).get("payload") or {}).get("source")
+    except (OSError, ValueError):
+        return True
+    return not (isinstance(source, dict) and "subagent" in source)
+
+
+def _codex_tail(event, result, proot):
+    """Keep a note of what a Codex session still has unreflected, for a later pass to pick up."""
+    sid = result.get("session_id")
+    if not sid:
+        return
+    if result.get("triggered"):
+        tails.clear(sid, proot)
+    elif result.get("count", 0) > 0:
+        tails.note(sid, event.get("transcript_path"), result["count"], proot)
 
 
 def _run_id(result):
@@ -95,6 +126,8 @@ def _detached_launch(transcript_path, session_id, run_id, roots):
 def _reflect(event, result, roots, launch=None):
     transcript_path = event.get("transcript_path")
     if not transcript_path:
+        if layer.HARNESS == "codex" and result.get("session_id"):  # the window is gone: say so on disk
+            tails.gap(result["session_id"], "no_transcript_path", result.get("count", 0), roots.get(layer.PROJECT))
         return
     (launch or _detached_launch)(transcript_path, result.get("session_id", ""), _run_id(result), roots)
 
@@ -112,11 +145,13 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
     if not isinstance(event, dict):
         return {"ignored": True, "reason": "non-object hook input"}
     name = event.get("hook_event_name")
-    roots = _roots(roots)
+    roots = _roots(roots, event.get("cwd"))
     proot = roots.get(layer.PROJECT)
     fire = reflect or _reflect
     curate = consolidate or _consolidate_launch
     try:
+        if name in ("Stop", "SessionEnd", "PreToolUse") and not _primary_session(event):
+            return {"ignored": True, "reason": "subagent_session"}
         if name == "SessionStart":
             return {"handled": name, "result": on_session_start.on_session_start(event, roots=roots)}
         if name == "Stop":
@@ -135,6 +170,8 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
             result = on_stop.on_stop(event, root=proot)
             if drain_error:
                 result = {**result, "drain_error": drain_error}
+            if layer.HARNESS == "codex":
+                _codex_tail(event, result, proot)
             if result.get("triggered"):
                 fire(event, result, roots)
             if config.CONSOLIDATE_EVERY_N and pcount % config.CONSOLIDATE_EVERY_N == 0:
@@ -142,6 +179,8 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
             return {"handled": name, "result": result}
         if name == "SessionEnd":
             result = on_session_end.on_session_end(event, root=proot)
+            if layer.HARNESS == "codex" and result.get("session_id"):
+                tails.clear(result["session_id"], proot)  # the session is over: nothing left to pick up later
             if result.get("triggered"):
                 fire(event, result, roots)
             return {"handled": name, "result": result}

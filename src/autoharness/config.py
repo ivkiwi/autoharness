@@ -68,6 +68,20 @@ DISABLE_GLOBAL = _bool_env("AUTOHARNESS_DISABLE_GLOBAL", False)
 # lifecycle archives nothing; intents with their verdicts go to proposals/ for that gate to decide
 PROPOSE_ONLY = _bool_env("AUTOHARNESS_PROPOSE_ONLY", False)
 
+HARNESS = layer.HARNESS  # "claude" (default) or "codex": set by the hook command; picks roots and the reflector carrier
+# Codex carrier: no plugin and no --agent, so the agent prompt rides stdin ahead of the bundle;
+# `-s read-only` is the write backstop, `--ephemeral` leaves no rollout for other collectors to mistake for work.
+CODEX_BIN = os.environ.get("AUTOHARNESS_CODEX_BIN", "codex")
+CODEX_MODEL = os.environ.get("AUTOHARNESS_CODEX_MODEL", "gpt-6-luna")  # the cheap tier on this account; empty = whatever Codex is configured with
+CODEX_EFFORT = os.environ.get("AUTOHARNESS_CODEX_EFFORT", "low")
+# extra compare-first roots beyond the managed layers, os.pathsep-separated; `{project}` = the repo
+# (the project root's parent). Codex reads the shared canon (~/.agents/skills and <repo>/.agents/skills)
+# natively, so its reflector must see it or it proposes duplicates. Never written by autoharness.
+INDEX_ROOTS = os.environ.get(
+    "AUTOHARNESS_INDEX_ROOTS",
+    os.pathsep.join(("~/.agents/skills", "{project}/.agents/skills")) if HARNESS == "codex" else "",
+)
+
 
 def active_layers():
     """Layers this deployment may inspect and manage."""
@@ -100,6 +114,7 @@ NOTIFY_TIMEOUT_S = max(1, _int_env("AUTOHARNESS_NOTIFY_TIMEOUT_S", 5))
 _LIB = Path(__file__).parent / "lib"
 REDACTION_RULES = _LIB / "redaction_rules.toml"  # secret/PII rule set, single source for CAP egress + LED
 FORMAT_SPEC = _LIB / "format_spec.md"            # #416 single source for authoring + lint
+AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"  # reflector/curator prompts, inlined for a carrier without --agent
 
 CHILD_SESSION_ENV = "AUTOHARNESS_CHILD_SESSION"  # recursion-guard signal: set ONLY by spawn, read by CAP hooks (single source). Must be autoharness-owned: the host sets CLAUDE_CODE_CHILD_SESSION on every hook subprocess, so reusing it would gate every top-level turn.
 
@@ -121,7 +136,7 @@ PROJECT_ROOT_ENV = layer.PROJECT_ROOT_ENV  # same: the project layer root, where
 
 
 # the shared canon gate (one queue, one journal, one set of releases for every harness on this host)
-HARNESS = os.environ.get("AUTOHARNESS_HARNESS", "claude")  # who wrote a queued proposal: claude | codex
+# HARNESS (who wrote a queued proposal: claude | codex) is defined above, once, from layer
 GATE_DIR = Path(os.environ.get("AUTOHARNESS_GATE_DIR") or Path.home() / ".agents" / "skill-gate")
 CANON_ROOT = Path(os.environ.get("AUTOHARNESS_CANON_ROOT") or Path.home() / ".agents")  # skills/, skill-releases/
 # other harnesses' skill roots: a new canon name must be free in every place a harness discovers skills

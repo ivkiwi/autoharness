@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from autoharness import config
-from autoharness.lib import redact
+from autoharness.lib import layer, redact
 
 TRUNCATION_MARK = "...[truncated]"
 
@@ -79,6 +79,37 @@ def _digest_record(line, max_chars):
     return role, text
 
 
+def _digest_record_codex(line, max_chars):
+    """Codex rollout: `response_item` records. Tool calls keep their name; messages keep their text.
+    Injected instructions (AGENTS.md, environment context) ride as `user` messages too, so a user
+    line counts only when the host tags it as the person's own text (content_item_kinds)."""
+    record = json.loads(line)
+    if record.get("type") != "response_item":
+        return None
+    item = record.get("payload") or {}
+    kind = item.get("type")
+    if kind in ("custom_tool_call", "function_call"):
+        return "assistant", f"[tool: {item.get('name', '?')}]"
+    role = item.get("role")
+    if kind != "message" or role not in ("user", "assistant"):
+        return None
+    if role == "user":
+        meta = item.get("internal_chat_message_metadata_passthrough") or {}
+        if "user.text" not in (meta.get("content_item_kinds") or []):
+            return None
+    parts = [c.get("text") for c in item.get("content") or [] if isinstance(c, dict)]
+    text = " ".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
+    if not text:
+        return None
+    if len(text) > max_chars:
+        text = text[:max_chars] + TRUNCATION_MARK
+    return role, text
+
+
+def _digest_parser():
+    return _digest_record_codex if layer.HARNESS == "codex" else _digest_record
+
+
 def digest(transcript_path, end_offset, *, max_exchanges=None, max_record_chars=None,
            max_digest_bytes=None, rules_path=None):
     exchanges = max_exchanges or config.DIGEST_EXCHANGES
@@ -90,9 +121,10 @@ def digest(transcript_path, end_offset, *, max_exchanges=None, max_record_chars=
     with open(path, "rb") as f:
         data = f.read(end_offset)
     kept, total, users_seen = [], 0, 0
+    parse = _digest_parser()
     for line in reversed(data.decode("utf-8", errors="replace").splitlines()):
         try:
-            entry = _digest_record(line, record_chars)
+            entry = parse(line, record_chars)
         except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
             continue
         if entry is None:

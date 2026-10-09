@@ -57,6 +57,52 @@ root: a `.mcp.json` there would also be this checkout's project config, which ou
 same-command server and leaves the reflector without its tool in sessions inside the repo.
 
 
+### Codex (manual install, phase 1)
+
+Codex has no plugin mechanism, so the same dispatcher is wired by hand. Its hooks carry the Claude
+field names (`session_id`, `transcript_path`, `tool_name`, `tool_input`, `cwd`), report the shell
+as `Bash`, and fire `SessionStart`, `Stop`, `PreToolUse`, `PostToolUse` and `SessionEnd` (checked
+against `codex exec` 0.162.0). `AUTOHARNESS_HARNESS=codex` moves every root under `~/.codex` and
+`<repo>/.codex`, so a Claude and a Codex session on the same repo never share counters, queues or
+skills; compare-first additionally reads the canon Codex loads natively (`~/.agents/skills`,
+`<repo>/.agents/skills`), read-only.
+
+Phase 1 is propose-only: nothing lands, nothing is archived, every intent goes to
+`<repo>/.codex/autoharness/proposals/` for the shared gate. Skill reads inside shell commands are
+not counted (no use/view numerator on Codex yet), so graduation review must stay parked there.
+
+`~/.codex/hooks.json` fragment (merge into the existing `hooks` object; one line per event):
+
+```json
+{ "hooks": {
+  "SessionStart": [{ "hooks": [{ "type": "command", "command": "AUTOHARNESS_HARNESS=codex AUTOHARNESS_PROPOSE_ONLY=1 AUTOHARNESS_DISABLE_GLOBAL=1 AUTOHARNESS_GRADUATION_SUSPENDED=1 PYTHONPATH=/path/to/autoharness/src python3 -m autoharness.hook.dispatch" }] }],
+  "Stop":         [{ "hooks": [{ "type": "command", "command": "AUTOHARNESS_HARNESS=codex AUTOHARNESS_PROPOSE_ONLY=1 AUTOHARNESS_DISABLE_GLOBAL=1 AUTOHARNESS_GRADUATION_SUSPENDED=1 PYTHONPATH=/path/to/autoharness/src python3 -m autoharness.hook.dispatch" }] }],
+  "PreToolUse":   [{ "hooks": [{ "type": "command", "command": "AUTOHARNESS_HARNESS=codex AUTOHARNESS_PROPOSE_ONLY=1 AUTOHARNESS_DISABLE_GLOBAL=1 AUTOHARNESS_GRADUATION_SUSPENDED=1 PYTHONPATH=/path/to/autoharness/src python3 -m autoharness.hook.dispatch" }] }],
+  "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "AUTOHARNESS_HARNESS=codex AUTOHARNESS_PROPOSE_ONLY=1 AUTOHARNESS_DISABLE_GLOBAL=1 AUTOHARNESS_GRADUATION_SUSPENDED=1 PYTHONPATH=/path/to/autoharness/src python3 -m autoharness.hook.dispatch" }] }]
+} }
+```
+
+`/path/to/autoharness/src` is the plugin cache (`~/.claude/plugins/cache/autoharness/autoharness/<version>/src`)
+or a checkout. The reflector child is `codex exec -s read-only --ephemeral` with the agent prompt on
+stdin and `stage_skill` registered per invocation through `-c mcp_servers.stage_skill.*`, so
+`config.toml` needs nothing for background learning. Only an in-session `/learn`-style staging
+needs the server there:
+
+```toml
+[mcp_servers.stage_skill]
+command = "python3"
+args = ["-m", "autoharness.stage_skill.server"]
+
+[mcp_servers.stage_skill.env]
+PYTHONPATH = "/path/to/autoharness/src"
+AUTOHARNESS_HARNESS = "codex"
+```
+
+Sessions interrupted without `SessionEnd` leave their unreflected activity as a note under
+`<repo>/.codex/autoharness/tails/<session>.json` (`tails.pending()`), for a scheduled pass to pick up;
+a hook event without a transcript path records a `coverage_gap` there instead of reflecting.
+Turning this on is a separate decision; nothing here is installed by the plugin.
+
 ### Update
 
 Update and uninstall are shown in their terminal form (`claude plugin …`); inside Claude Code the same
@@ -103,6 +149,9 @@ configure unless you want to change the pace.
 | Variable | Default | What it does |
 |---|---|---|
 | `AUTOHARNESS_DISABLE_GLOBAL` | `0` | Set to `1` for a project-only deployment. Global create intents are rejected before staging and landing; global request/use/view counters, archiving, orphan sweeps, recall, curator snapshots, and metrics are skipped. Existing global skills stay untouched. Project-layer learning continues normally. |
+| `AUTOHARNESS_HARNESS` | `claude` | Which host runs the hooks. `codex` moves every root under `~/.codex` and `<repo>/.codex`, runs the reflector as `codex exec -s read-only --ephemeral`, and keeps unreflected tails as notes (see [Codex](#codex-manual-install-phase-1)). |
+| `AUTOHARNESS_INDEX_ROOTS` | codex: `~/.agents/skills:{project}/.agents/skills`, claude: empty | Extra skill roots offered to compare-first as read-only canon (`[canon]` lines), `os.pathsep`-separated; `{project}` is the repo. Never written, never curated. |
+| `AUTOHARNESS_CODEX_BIN` / `AUTOHARNESS_CODEX_MODEL` / `AUTOHARNESS_CODEX_EFFORT` | `codex` / `gpt-6-luna` / `low` | The Codex carrier: executable, reflector model (empty = the model Codex is configured with) and reasoning effort. |
 
 **Cadence — when it learns**
 

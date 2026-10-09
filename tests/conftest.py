@@ -3,6 +3,7 @@ import os
 import pytest
 
 from autoharness import config
+from autoharness.lib import layer
 
 
 @pytest.fixture
@@ -46,5 +47,6 @@ def _private_gate_and_flags(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(config, "CANON_ROOT", gate / "agents")
     monkeypatch.setattr(config, "HOST_SKILL_ROOTS", [gate / "claude-skills", gate / "codex-skills"])
     monkeypatch.setattr(config, "HARNESS", "claude")
+    monkeypatch.setattr(layer, "HARNESS", "claude", raising=False)  # the roots side of the same switch
     monkeypatch.setattr(config, "PROPOSE_ONLY", False)
     monkeypatch.setattr(config, "DISABLE_GLOBAL", False)
