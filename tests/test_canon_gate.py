@@ -305,3 +305,16 @@ def test_a_rollback_notice_lost_to_a_crash_is_added_by_the_next_pass(canon_foo, 
     gate.run_once(Fake(secret="never-in-a-prompt"))
     texts = [json.loads(line)["text"] for line in (config.GATE_DIR / "notices.jsonl").read_text().splitlines()]
     assert texts == ["patch foo (from claude)", "rollback foo (from claude)"]
+
+
+def test_a_recovered_rollback_notice_keeps_who_rolled_back(canon_foo, monkeypatch):
+    _queue_patch()
+    gate.run_once(Fake())
+    with monkeypatch.context() as m:
+        m.setattr(config, "HARNESS", "codex")
+        m.setattr(release.notices, "notify", lambda *a: (_ for _ in ()).throw(KeyboardInterrupt))
+        with pytest.raises(KeyboardInterrupt):
+            release.rollback("foo")
+    gate.run_once(Fake(secret="never-in-a-prompt"))  # this pass runs as claude
+    texts = [json.loads(line)["text"] for line in (config.GATE_DIR / "notices.jsonl").read_text().splitlines()]
+    assert texts[-1] == "rollback foo (from codex)"

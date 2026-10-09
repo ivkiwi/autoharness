@@ -417,3 +417,22 @@ def test_a_rollback_leaves_a_notice(tmp_path):
     release.rollback("foo")
     texts = [json.loads(line)["text"] for line in (config.GATE_DIR / "notices.jsonl").read_text().splitlines()]
     assert texts == ["rollback foo (from claude)"]
+
+
+@pytest.mark.parametrize("approval,report,routine", [
+    ("# Only after approval", "## Report", "#\tRoutine actions"),            # ATX with a tab
+    ("# Only after approval", "## Report", "Routine actions\n==============="),  # setext level 1
+    ("## Only after approval", "### Report", "Routine actions\n---------------"),  # setext level 2
+])
+def test_every_heading_form_moves_its_section(approval, report, routine):
+    _skill(release.skills_dir(), "foo", BODY.format(name="foo")
+           + f"{approval}\n{report}\nPost the report to Slack.\n{routine}\nFormat the date.\n")
+    row = _row(action="patch", old_string=f"{approval}\n{report}\n",
+               new_string=f"{approval}\n{routine}\n{report}\n")
+    assert select.classify(row) == ("out_of_phase", "authority")
+
+
+def test_a_heading_inside_a_code_fence_is_not_a_section():
+    text = "# Only after approval\n```\n# Routine actions\n```\nPost the report to Slack.\n"
+    [(chain, _)] = select._contexts(text, select._authority).keys()
+    assert chain == ("Only after approval",)

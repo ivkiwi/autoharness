@@ -158,7 +158,8 @@ def _switch(op, name, expect, to, event_id, **extra):
     if live != expect:
         raise Conflict(f"{name}: live entry {live} is not the expected {expect}")
     tx = {"op": "prepared", "tx": f"{event_id}:{time.time_ns()}", "kind": op, "event_id": event_id,
-          "name": name, "prev": live, "to": to, **extra}  # tx: unique per attempt, a retry is a new one
+          "name": name, "prev": live, "to": to, "harness": config.HARNESS,
+          **extra}  # tx: unique per attempt, a retry is a new one; harness: who switched it, for recovery
     # a directory can only leave by moving; a link only has to move when nothing replaces it
     if live["kind"] == "dir" or (live["kind"] == "link" and to is None):
         tx["displaced"] = _displaced_path(name)  # journalled before the move: a crash right after still finds it
@@ -262,9 +263,9 @@ def rollback(name):
                                or tree_sha256(Path(to["target"])) != to["sha"]):
             raise Conflict(f"{name}: frozen baseline {to['target']} is missing or changed")
         tx = _switch("rollback", name, expect, to, f"rollback-{last['event_id']}")
-        notices.notify(tx["event_id"], rollback_notice(name))  # a crash before this: the gate pass adds it
+        notices.notify(tx["event_id"], rollback_notice(tx))  # a crash before this: the gate pass adds it
         return tx
 
 
-def rollback_notice(name):
-    return f"rollback {name} (from {config.HARNESS})"
+def rollback_notice(tx):
+    return f"rollback {tx['name']} (from {tx.get('harness') or config.HARNESS})"

@@ -267,7 +267,7 @@ def _reconcile(rows):
     decided = _decisions(only="published")
     for tx in release.journal_entries():
         if tx.get("op") == "committed" and tx.get("kind") == "rollback":
-            _notify(tx["event_id"], release.rollback_notice(tx["name"]))
+            _notify(tx["event_id"], release.rollback_notice(tx))
         if tx.get("op") == "committed" and tx.get("kind") == "publish" and tx.get("event_id") in by_id \
                 and tx["event_id"] not in decided:
             _decide(by_id[tx["event_id"]], "published", release=tx["to"]["target"],

@@ -140,18 +140,44 @@ def classify(row):
     return ("out_of_phase", reason) if reason else ("eligible", body)
 
 
+_ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)")
+_SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
 def _contexts(text, pattern):
-    """Each line matching pattern with the heading it sits under, as a multiset: a line that moves to
-    another section changes its context even when the line diff calls the heading the thing that moved."""
-    path, out = [], Counter()  # the whole heading chain: moving a parent heading moves its children too
-    for line in text.splitlines():
+    """Each line matching pattern with the chain of Markdown headings it sits under, as a multiset: a
+    line that moves to another section, or whose parent heading moves, changes its context even when
+    the line diff calls the heading the thing that moved. ATX (#, any blank after it) and setext
+    (=== / --- underlines) headings count; nothing inside a code fence or the frontmatter does."""
+    fm = validate._FRONTMATTER.match(text)
+    lines = (text[fm.end():] if fm else text).splitlines()
+    chain, out, fence, prev = [], Counter(), None, None
+    for line in lines:
         stripped = line.strip()
-        level = len(stripped) - len(stripped.lstrip("#"))
-        if level and stripped[level:level + 1] in (" ", ""):
-            path = [(lvl, h) for lvl, h in path if lvl < level] + [(level, stripped)]
-        elif pattern(line):
-            out[(tuple(h for _, h in path), stripped)] += 1
-    return out
+        opener = _FENCE.match(line)
+        if fence:
+            fence = None if opener and opener.group(1)[0] == fence else fence
+            prev = None
+            continue
+        if opener:
+            fence, prev = opener.group(1)[0], None
+            continue
+        atx, setext = _ATX.match(line), _SETEXT.match(line)
+        if atx:
+            level, title = len(atx.group(1)), stripped.lstrip("#").strip()
+        elif setext and prev:
+            level, title = (1 if setext.group(1)[0] == "=" else 2), prev
+            if out and pattern(prev):  # the line just read as text was a heading after all
+                out[(tuple(h for _, h in chain), prev)] -= 1
+        else:
+            if stripped and pattern(line):
+                out[(tuple(h for _, h in chain), stripped)] += 1
+            prev = stripped or None
+            continue
+        chain = [(lvl, h) for lvl, h in chain if lvl < level] + [(level, title)]
+        prev = None
+    return +out
 
 
 def _authority(line):
