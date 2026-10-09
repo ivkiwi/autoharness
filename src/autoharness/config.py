@@ -26,6 +26,9 @@ def _int_env(name, default):
 # Recalibrated with the numerator: the old turn-based 10 lands near 30-50 tool calls, and the standing
 # ruling is to err sparse (precipitation is maintenance, and SessionEnd flushes the tail).
 REFLECT_EVERY_N = _int_env("AUTOHARNESS_REFLECT_EVERY_N", 50)  # the window itself is watermark-delimited (capture)
+# a child that never completes (a refusal before the model, a missing binary) must not be fed the same
+# window forever: after this many failed launches in a row the window is given up as a coverage gap
+REFLECT_MAX_FAILURES = _int_env("AUTOHARNESS_REFLECT_MAX_FAILURES", 3)
 CONSOLIDATE_EVERY_N = _int_env("AUTOHARNESS_CONSOLIDATE_EVERY_N", 250)  # ponytail: placeholder, calibrate in experiments/; curator (content-level merge) beat, same quantum as REFLECT_EVERY_N and held sparser than it
 
 # raw-capture byte caps (ponytail: placeholders, calibrate in experiments/): per transcript record,

@@ -383,7 +383,14 @@ def main(argv=None):
                  digest=capture.digest(transcript_path, offset), provenance=provenance,
                  spawn_fn=spawn_and_remember)
     if outcome.get("returncode", 0) != 0:
-        return result  # not consumed (a refusal before the model counts): the watermark and the note stay
+        # not consumed (a refusal before the model counts): the watermark and the note stay, unless the
+        # child has now failed REFLECT_MAX_FAILURES times on this window — then the window is given up
+        # explicitly rather than fed forever
+        proot = roots[layer.PROJECT]
+        if layer.HARNESS == "codex" and tails.fail(session_id, proot) >= config.REFLECT_MAX_FAILURES:
+            counters.write_session_offset(session_id, new_offset, proot)
+            tails.give_up(session_id, f"reflection_failed_{config.REFLECT_MAX_FAILURES}x", new_offset, proot)
+        return result
     counters.write_session_offset(session_id, new_offset, roots[layer.PROJECT])
     if layer.HARNESS == "codex":
         tails.settle(session_id, launched_from, new_offset, roots[layer.PROJECT])

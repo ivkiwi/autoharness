@@ -4,6 +4,7 @@ Claude field names, the shell reported as `Bash`, `transcript_path` null under -
 agent_type; SessionStart/Stop/PreToolUse/PostToolUse/SessionEnd all fired."""
 import hashlib
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -229,6 +230,56 @@ def test_reflection_settles_only_the_note_it_was_launched_from(codex, repo, tmp_
     assert note["count"] == 1
     assert note["offset"] == size_before == counters.session_offset(SID, repo / ".codex")  # B starts where A stopped
     assert note["transcript_path"] == str(transcript)
+
+
+def test_chronic_child_failure_gives_the_window_up(codex, repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "REFLECT_MAX_FAILURES", 3, raising=False)
+    transcript = Path(_rollout(tmp_path / "rollout.jsonl"))
+    for i in range(config.REFLECT_EVERY_N):
+        _tool(repo, str(transcript), i)
+    _stop(repo, str(transcript))
+    refused = lambda argv, env, payload: SimpleNamespace(returncode=2, stderr="MCP tool call requires approval")  # noqa: E731
+
+    for streak in (1, 2):
+        _confirm_reflection(transcript, repo, tmp_path, child=refused)
+        [note] = tails.pending(repo / ".codex")
+        assert note["failures"] == streak and "coverage_gap" not in note
+        assert counters.session_offset(SID, repo / ".codex") == 0  # still fed next time
+
+    _confirm_reflection(transcript, repo, tmp_path, child=refused)
+    [note] = tails.pending(repo / ".codex")
+    assert note["coverage_gap"] == "reflection_failed_3x" and note["failures"] == 0
+    assert note["offset"] == transcript.stat().st_size == counters.session_offset(SID, repo / ".codex")  # given up, moved on
+
+
+def test_tail_note_and_settle_share_one_lock(codex, repo, tmp_path, monkeypatch):
+    root = repo / ".codex"
+    tails.note(SID, "/t.jsonl", 50, root)  # note A
+    version_a = tails.read(SID, root)["version"]
+    inside, proceed = threading.Event(), threading.Event()
+    real_read = tails._read
+
+    def slow_read(p):  # settle has read A and is about to act on it; hold it there
+        data = real_read(p)
+        if not inside.is_set():
+            inside.set()
+            proceed.wait(5)
+        return data
+
+    monkeypatch.setattr(tails, "_read", slow_read)
+    settling = threading.Thread(target=tails.settle, args=(SID, version_a, 100, root))
+    settling.start()
+    assert inside.wait(5)
+    stop = threading.Thread(target=tails.note, args=(SID, "/t.jsonl", 1, root))  # a Stop during settle: note B
+    stop.start()
+    stop.join(0.3)
+    assert stop.is_alive()  # B waits for the lock instead of slipping in between settle's read and unlink
+    proceed.set()
+    settling.join(5)
+    stop.join(5)
+    assert not settling.is_alive() and not stop.is_alive()
+    [note] = tails.pending(root)
+    assert note["count"] == 1  # A settled, B written after it and kept
 
 
 def test_session_end_with_nothing_new_keeps_an_earlier_gap_note(codex, repo):
