@@ -83,8 +83,10 @@ not counted (no use/view numerator on Codex yet), so graduation review must stay
 ```
 
 `/path/to/autoharness/src` is the plugin cache (`~/.claude/plugins/cache/autoharness/autoharness/<version>/src`)
-or a checkout. The reflector child is `codex exec -s read-only --ephemeral` with the agent prompt on
-stdin and `stage_skill` registered per invocation through `-c mcp_servers.stage_skill.*`, so
+or a checkout. The reflector child is `codex exec -s read-only --ephemeral --ignore-user-config` with
+the agent prompt on stdin: the user layer is empty, so none of the user's MCP servers, web search or
+features (apps, browser, computer use) reach the child, and `stage_skill` is registered per invocation
+through `-c mcp_servers.stage_skill.*` with `approval_mode=approve` (a headless exec never asks).
 `config.toml` needs nothing for background learning. Only an in-session `/learn`-style staging
 needs the server there:
 
@@ -98,9 +100,10 @@ PYTHONPATH = "/path/to/autoharness/src"
 AUTOHARNESS_HARNESS = "codex"
 ```
 
-Sessions interrupted without `SessionEnd` leave their unreflected activity as a note under
-`<repo>/.codex/autoharness/tails/<session>.json` (`tails.pending()`), for a scheduled pass to pick up;
-a hook event without a transcript path records a `coverage_gap` there instead of reflecting.
+Every window still unreflected is a note under `<repo>/.codex/autoharness/tails/<session>.json`
+(`tails.pending()`): written on a Stop, cleared only once the reflection actually fed the window, so a
+failed launch or a session that ends without `SessionEnd` leaves it for a scheduled pass; a hook
+event without a transcript path records a `coverage_gap` there instead of reflecting.
 Turning this on is a separate decision; nothing here is installed by the plugin.
 
 ### Update

@@ -63,6 +63,14 @@ def _state(repo):
     return repo / ".codex" / "autoharness"
 
 
+def _confirm_reflection(transcript, repo, tmp_path, *, monkeypatch=None, child=None):
+    """Run spawn.main the way the detached launch does, with a stand-in child (no codex)."""
+    import unittest.mock as mock
+    fake = child or (lambda argv, env, payload: SimpleNamespace(returncode=0, stderr=""))
+    with mock.patch.object(spawn, "_detached_spawn", fake):
+        return spawn.main([str(transcript), SID, "run-1", str(repo / ".codex"), str(tmp_path / "g")])
+
+
 # --- roots -------------------------------------------------------------------------------------
 
 def test_default_roots_follow_the_harness(codex, repo, monkeypatch):
@@ -87,7 +95,8 @@ def test_normal_codex_turn_counts_under_codex_root_and_reflects(codex, repo, tmp
     assert counters.session_count(SID, repo / ".codex") == 0  # reset on trigger
     assert counters.request_count(layer.PROJECT, repo / ".codex") == 1
     assert not (repo / ".claude").exists()  # the Codex adapter never writes into Claude's state
-    assert tails.pending(repo / ".codex") == []  # a fired reflection leaves no tail
+    [note] = tails.pending(repo / ".codex")  # kept until spawn.main confirms the window was fed
+    assert (note["count"], note["offset"]) == (config.REFLECT_EVERY_N, 0)
 
 
 # --- acceptance: fewer than N calls, then the session ends ------------------------------------
@@ -106,6 +115,8 @@ def test_short_session_keeps_a_tail_note_until_session_end_flushes(codex, repo, 
     out = dispatch.dispatch(_ev("SessionEnd", repo, transcript, reason="other"),
                             reflect=lambda ev, res, roots: seen.append(res))
     assert out["result"]["triggered"] and seen[0]["count"] == 3  # the tail still reflects, through SessionEnd
+    assert tails.pending(repo / ".codex")[0]["count"] == 3  # and stays noted until that reflection ran
+    _confirm_reflection(transcript, repo, tmp_path, monkeypatch=None)
     assert tails.pending(repo / ".codex") == []
 
 
@@ -160,7 +171,37 @@ def test_repeated_stop_never_reflects_twice(codex, repo, tmp_path):
     _stop(repo, transcript, reflect=lambda ev, res, roots: seen.append(res))
     again = _stop(repo, transcript, reflect=lambda ev, res, roots: seen.append(res))
     assert len(seen) == 1 and not again["result"]["triggered"]
+    assert tails.pending(repo / ".codex")[0]["count"] == config.REFLECT_EVERY_N  # a quiet Stop touches no note
+
+
+def test_tail_survives_a_failed_launch_and_clears_after_a_confirmed_reflection(codex, repo, tmp_path):
+    transcript = Path(_rollout(tmp_path / "rollout.jsonl"))
+    for i in range(config.REFLECT_EVERY_N):
+        _tool(repo, str(transcript), i)
+    _stop(repo, str(transcript))  # triggered: the counter is reset, the note carries the window
+    assert tails.pending(repo / ".codex")[0]["count"] == config.REFLECT_EVERY_N
+
+    def crashing(argv, env, payload):
+        raise OSError("codex: not found")
+
+    with pytest.raises(OSError):
+        _confirm_reflection(transcript, repo, tmp_path, child=crashing)
+    assert tails.pending(repo / ".codex")[0]["offset"] == 0  # nothing fed: the note and the watermark stay
+    assert counters.session_offset(SID, repo / ".codex") == 0
+
+    _confirm_reflection(transcript, repo, tmp_path)
     assert tails.pending(repo / ".codex") == []
+    assert counters.session_offset(SID, repo / ".codex") == transcript.stat().st_size
+
+
+def test_session_end_with_nothing_new_keeps_an_earlier_gap_note(codex, repo):
+    for i in range(config.REFLECT_EVERY_N):
+        _tool(repo, None, i)
+    _stop(repo, None, reflect=lambda ev, res, roots: dispatch._reflect(ev, res, roots, launch=lambda *a: None))
+    assert tails.pending(repo / ".codex")[0]["coverage_gap"] == "no_transcript_path"
+    out = dispatch.dispatch(_ev("SessionEnd", repo, None, reason="other"), reflect=lambda *a: None)
+    assert not out["result"]["triggered"]
+    assert tails.pending(repo / ".codex")[0]["coverage_gap"] == "no_transcript_path"  # a quiet end erases nothing
 
 
 # --- acceptance: a reflector child, no recursion ----------------------------------------------
@@ -182,6 +223,21 @@ def test_subagent_rollout_is_ignored_entirely(codex, repo, tmp_path):
     out = _stop(repo, transcript, reflect=lambda *a: pytest.fail("a subagent must never reflect"))
     assert out["reason"] == "subagent_session"
     assert not _state(repo).exists()
+
+
+def test_subagent_markers_are_honoured_in_every_handler(codex, repo, tmp_path):
+    state = _state(repo)
+    state.mkdir(parents=True)
+    (state / "last_run.json").write_text('{"landed": 1}', encoding="utf-8")
+    transcript = _rollout(tmp_path / "rollout.jsonl")  # a primary-looking rollout, but the payload names a role
+    for name, extra in (("SessionStart", {"source": "startup"}), ("PreToolUse", {"tool_name": "Bash", "tool_input": {}}),
+                        ("Stop", {}), ("SessionEnd", {"reason": "other"})):
+        for path in (None, transcript):
+            out = dispatch.dispatch(_ev(name, repo, path, agent_type="worker", **extra), reflect=lambda *a: None)
+            assert out == {"ignored": True, "reason": "subagent_session"}, (name, path)
+    assert (state / "last_run.json").exists()  # the user's summary line is not consumed by a child
+    assert counters.request_count(layer.PROJECT, repo / ".codex") == 0
+    assert tails.pending(repo / ".codex") == []
 
 
 def test_unreadable_or_odd_transcript_header_is_treated_as_primary(codex, repo, tmp_path):
@@ -280,6 +336,17 @@ def test_codex_carrier_command_registers_stage_skill_and_guards_the_child(codex,
     assert 'model_reasoning_effort="low"' in overrides
 
 
+def test_codex_child_has_a_closed_tool_set(codex, repo):
+    argv = spawn.build_codex_command(codex_bin="codex", run_id="r", proot=repo / ".codex", cwd=repo)
+    assert "--ignore-user-config" in argv  # none of the user's MCP servers, web search or features
+    disabled = [argv[i + 1] for i, a in enumerate(argv) if a == "--disable"]
+    assert set(disabled) == {"apps", "browser_use", "browser_use_external", "computer_use"}
+    overrides = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
+    assert 'web_search="disabled"' in overrides
+    assert 'mcp_servers.stage_skill.tools.stage_skill.approval_mode="approve"' in overrides  # headless never asks
+    assert argv.index("-s") + 1 == argv.index("read-only")
+
+
 def test_codex_carrier_without_model_leaves_the_configured_default():
     argv = spawn.build_codex_command(codex_bin="codex", run_id="r", proot="/p/.codex", cwd="/p", model="")
     assert "-m" not in argv
@@ -333,6 +400,16 @@ def test_description_index_offers_canon_roots_read_only(codex, repo, tmp_path, m
     assert "- canon-one [canon]: Use when shipping." in idx
     assert "old" not in idx  # hidden backup dirs beside the canon are not offered
     assert "canon" not in spawn.description_index(roots, agent_only=True)  # the curator never sees it
+
+
+def test_compare_first_reads_global_even_when_global_is_disabled(codex, repo, tmp_path):
+    roots = {layer.PROJECT: repo / ".codex", layer.GLOBAL: tmp_path / "g"}
+    (roots[layer.GLOBAL] / "skills" / "glob-one").mkdir(parents=True)
+    (roots[layer.GLOBAL] / "skills" / "glob-one" / "SKILL.md").write_text(GOOD.format(n="glob-one", d="globbing"),
+                                                                         encoding="utf-8")
+    assert config.DISABLE_GLOBAL  # the fixture's deployment
+    assert "- glob-one [global]: Use when globbing." in spawn.description_index(roots)
+    assert "glob-one" not in spawn.description_index(roots, agent_only=True)  # not the curator's to manage
 
 
 def test_index_roots_default_is_empty_for_claude(monkeypatch):

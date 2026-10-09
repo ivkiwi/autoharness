@@ -66,6 +66,8 @@ def _primary_session(event):
     (session_meta.source = {"subagent": ...}). No transcript: the env guard decides, not this."""
     if layer.HARNESS != "codex":
         return True
+    if event.get("agent_type"):
+        return False  # a spawn_agent child names its role here; the root session never does
     path = event.get("transcript_path")
     if not path:
         return True
@@ -78,13 +80,11 @@ def _primary_session(event):
 
 
 def _codex_tail(event, result, proot):
-    """Keep a note of what a Codex session still has unreflected, for a later pass to pick up."""
+    """Keep a note of what a Codex session still has unreflected, for a later pass to pick up. A
+    triggered window is noted too: the launch can fail after the counter reset, and only spawn.main
+    clears the note once the window was actually fed. A turn with nothing new touches no note."""
     sid = result.get("session_id")
-    if not sid:
-        return
-    if result.get("triggered"):
-        tails.clear(sid, proot)
-    elif result.get("count", 0) > 0:
+    if sid and result.get("count", 0) > 0:
         tails.note(sid, event.get("transcript_path"), result["count"], proot)
 
 
@@ -150,7 +150,7 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
     fire = reflect or _reflect
     curate = consolidate or _consolidate_launch
     try:
-        if name in ("Stop", "SessionEnd", "PreToolUse") and not _primary_session(event):
+        if not _primary_session(event):  # every handler: a subagent's SessionStart would eat last_run.json
             return {"ignored": True, "reason": "subagent_session"}
         if name == "SessionStart":
             return {"handled": name, "result": on_session_start.on_session_start(event, roots=roots)}
@@ -179,8 +179,6 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
             return {"handled": name, "result": result}
         if name == "SessionEnd":
             result = on_session_end.on_session_end(event, root=proot)
-            if layer.HARNESS == "codex" and result.get("session_id"):
-                tails.clear(result["session_id"], proot)  # the session is over: nothing left to pick up later
             if result.get("triggered"):
                 fire(event, result, roots)
             return {"handled": name, "result": result}

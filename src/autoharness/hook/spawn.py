@@ -30,6 +30,7 @@ from autoharness.lib import (
     redact,
     sidecar,
     skill_store,
+    tails,
     validate,
 )
 
@@ -68,7 +69,9 @@ def _index_line(path, symbol, tag):
 def description_index(roots=None, *, agent_only=False):
     roots = roots or {}
     lines = []
-    for lyr in config.active_layers():
+    # the reflector compares against everything a session can load, a disabled global layer included
+    # (its patch there becomes a proposal); the curator only ever manages the active layers
+    for lyr in (config.active_layers() if agent_only else layer.LAYERS):
         root = roots.get(lyr)
         skills = layer.skills_dir(lyr, root)
         if not skills.exists():
@@ -156,18 +159,32 @@ def _toml(value):
     return json.dumps(str(value))  # a TOML basic string is JSON-compatible
 
 
+# built-in features that act outside the sandbox; off in the child whatever the user's config says
+CODEX_DISABLED_FEATURES = ("apps", "browser_use", "browser_use_external", "computer_use")
+
+
 def build_codex_command(*, codex_bin, run_id, proot, cwd, model="", effort="low"):
     """`codex exec` as the reflector carrier: prompt on stdin, read-only sandbox as the write backstop,
     --ephemeral so the child leaves no rollout, stage_skill registered per invocation with the env the
     server reads (run id, project root, harness, child guard) — hooks inside the child inherit the
-    process env for the guard, the MCP server gets the same values explicitly."""
+    process env for the guard, the MCP server gets the same values explicitly.
+
+    The tool set is closed: --ignore-user-config empties the user layer, so none of the user's MCP
+    servers (a write through one of them passes a read-only sandbox), web search or feature flags
+    reach the child; stage_skill is the only server, and it carries approval_mode=approve because a
+    headless exec never asks — a tool without it is refused, not prompted."""
     server_env = {config.RUN_ID_ENV: run_id, config.PROJECT_ROOT_ENV: str(proot),
                   config.CHILD_SESSION_ENV: "1", layer.HARNESS_ENV: "codex",
                   "PYTHONPATH": str(Path(config.__file__).resolve().parent.parent)}
-    argv = [codex_bin, "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd),
-            "-c", f"mcp_servers.stage_skill.command={_toml(sys.executable)}",
-            "-c", 'mcp_servers.stage_skill.args=["-m","autoharness.stage_skill.server"]',
-            "-c", f"model_reasoning_effort={_toml(effort)}"]
+    argv = [codex_bin, "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral",
+            "--ignore-user-config", "-C", str(cwd)]
+    for feature in CODEX_DISABLED_FEATURES:
+        argv += ["--disable", feature]
+    argv += ["-c", 'web_search="disabled"',
+             "-c", f"mcp_servers.stage_skill.command={_toml(sys.executable)}",
+             "-c", 'mcp_servers.stage_skill.args=["-m","autoharness.stage_skill.server"]',
+             "-c", 'mcp_servers.stage_skill.tools.stage_skill.approval_mode="approve"',
+             "-c", f"model_reasoning_effort={_toml(effort)}"]
     for key, value in server_env.items():
         argv += ["-c", f"mcp_servers.stage_skill.env.{key}={_toml(value)}"]
     if model:
@@ -323,6 +340,8 @@ def main(argv=None):
     result = run(window_text, run_id, roots=roots, session_id=session_id,
                  digest=capture.digest(transcript_path, offset), provenance=provenance)
     counters.write_session_offset(session_id, new_offset, roots[layer.PROJECT])
+    if layer.HARNESS == "codex":
+        tails.clear(session_id, roots[layer.PROJECT])  # confirmed: the window was fed and the watermark moved
     return result
 
 

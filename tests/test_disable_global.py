@@ -80,7 +80,8 @@ def test_existing_global_skill_is_neither_archived_recalled_nor_counted(roots, m
     started = on_session_start.on_session_start(roots=roots)
     assert not started["archived"].get(layer.GLOBAL)
     assert not started["context"]
-    assert spawn.description_index(roots) == "(no live skills yet)"
+    assert "- foo [global]:" in spawn.description_index(roots)  # compare-first still reads it, read-only
+    assert spawn.description_index(roots, agent_only=True) == "(no live skills yet)"  # the curator does not
     assert set(metrics.collect(roots)) == {layer.PROJECT}
     assert not on_skill_call.on_skill_call({"skill_name": "foo"}, roots=roots)["counted"]
     path = skill_store.skill_path(layer.GLOBAL, "foo", roots[layer.GLOBAL])
