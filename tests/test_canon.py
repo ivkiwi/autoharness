@@ -455,3 +455,28 @@ def test_restructuring_a_plain_skill_is_fine():
     _skill(release.skills_dir(), "foo", BODY.format(name="foo") + "# Notes\nFormat the date.\n")
     row = _row(action="patch", old_string="# Notes\n", new_string="## Notes\n")
     assert select.classify(row)[0] == "eligible"
+
+
+def test_a_staged_canon_patch_without_a_level_is_scoped_by_its_target():
+    _skill(release.skills_dir(), "foo")
+    row = _row(action="patch", old_string="Use strftime.", new_string="Use strftime with a format.")
+    del row["intent"]["level"]  # stage_skill keeps level only for create
+    row["verdict"] = {"ok": False, "level": "global", "findings": [["self_produced", "x"]]}  # Claude: via ~/.claude
+    assert select.classify(row)[0] == "eligible"
+    row["verdict"] = {"ok": False, "level": None, "findings": [["routing", "unresolved/illegal level: None"]]}
+    assert select.classify(row)[0] == "eligible"  # Codex: the canon root is not one it manages
+
+
+def test_a_project_scoped_patch_stays_out():
+    _skill(release.skills_dir(), "foo")
+    row = _row(action="patch", old_string="Use strftime.", new_string="Use strftime -u.")
+    del row["intent"]["level"]
+    row["verdict"] = {"ok": False, "level": "project", "findings": [["self_produced", "x"]]}
+    assert select.classify(row) == ("out_of_phase", "scope")
+
+
+def test_a_create_without_global_stays_out():
+    row = _row()
+    del row["intent"]["level"]
+    row["verdict"] = {"ok": True, "level": "global", "findings": []}
+    assert select.classify(row) == ("out_of_phase", "scope")

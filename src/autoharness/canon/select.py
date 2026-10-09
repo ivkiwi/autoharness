@@ -19,6 +19,7 @@ PHASE1_ACTIONS = ("create", "update", "patch")
 # a rejection the gate may still take over: the promoter only refused to write somewhere it does not own
 _TAKEOVER = {"self_produced"}
 _GLOBAL_OFF = "AUTOHARNESS_DISABLE_GLOBAL"
+_UNRESOLVED = "unresolved/illegal level: None"
 # What a skill must never grant on its own: approval bypasses, privilege, outward sends, spending,
 # deletion, secrets, and the agents' own rules. Judged on the lines a change adds, so a skill that
 # already talks about Slack can still be patched; a hit is out of phase, never a silent pass.
@@ -107,13 +108,18 @@ def classify(row):
         return "out_of_phase", f"action:{action}"
     if intent.get("files"):
         return "out_of_phase", "files"
-    if intent.get("level") != "global":
+    # a create must name the global layer; a patch or update is scoped by its target: staging drops their
+    # level, and a harness that does not manage the canon root cannot resolve one (unresolved: None)
+    modify = action != "create"
+    level = intent.get("level") or (verdict.get("level") if modify else None)
+    if level != "global" and not (modify and level is None):
         return "out_of_phase", "scope"  # project skills are a later phase
     if not verdict.get("ok"):
         findings = verdict.get("findings") or []
         families = {f[0] for f in findings}
         taken_over = families <= _TAKEOVER | {"routing"} and all(
-            f[0] != "routing" or _GLOBAL_OFF in str(f[1]) for f in findings)
+            f[0] != "routing" or _GLOBAL_OFF in str(f[1]) or (modify and _UNRESOLVED in str(f[1]))
+            for f in findings)
         if not taken_over:
             return "out_of_phase", "rejected:" + ",".join(sorted(families))
     try:
