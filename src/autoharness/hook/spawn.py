@@ -10,14 +10,17 @@ here: the reflector only appends intents, the promoter exclusively validates and
 
 ponytail: run() is the body of the "detached background job" (synchronous spawn→wait→drain); the "do not block the host Stop" detach is started in the background at the hook top level by the Phase 7 dispatch calling run(). spawn_fn is injectable (system tests use a fake reflector script in place of the real claude). Precise handling of the transcript upper-bound race (cap.md open) is still tolerated at v0.
 """
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -192,13 +195,39 @@ def build_codex_command(*, codex_bin, run_id, proot, cwd, model="", effort="low"
     return argv + ["-"]
 
 
-def _carrier(agent, run_id, proot, claude_bin=None):
-    """(argv, preface): what runs the agent and what must precede the bundle on stdin."""
+@contextlib.contextmanager
+def _child_cwd():
+    """Codex only: an empty temporary cwd for the child. Codex discovers a project layer upward from
+    cwd, and a repo's .codex/config.toml could bring its own MCP servers into the child; the read-only
+    sandbox still reads skill files anywhere by absolute path, so the repo is named in the preface
+    instead of being the cwd."""
+    if layer.HARNESS != "codex":
+        yield None
+        return
+    d = tempfile.mkdtemp(prefix="autoharness-codex-")
+    try:
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _codex_skill_dirs(proot):
+    project = Path(proot).parent if proot else None
+    dirs = [project / ".codex" / "skills", project / ".agents" / "skills"] if project else []
+    return dirs + [Path.home() / ".codex" / "skills", Path.home() / ".agents" / "skills"]
+
+
+def _carrier(agent, run_id, proot, claude_bin=None, cwd=None):
+    """(argv, preface): what runs the agent and what must precede the bundle on stdin. `cwd` is the
+    child's working directory (Codex: from _child_cwd); never the repo."""
     if layer.HARNESS == "codex":
-        cwd = Path(proot).parent if proot else Path.cwd()
-        argv = build_codex_command(codex_bin=config.CODEX_BIN, run_id=run_id, proot=proot, cwd=cwd,
+        argv = build_codex_command(codex_bin=config.CODEX_BIN, run_id=run_id, proot=proot,
+                                   cwd=cwd or tempfile.gettempdir(),
                                    model=config.CODEX_MODEL, effort=config.CODEX_EFFORT)
-        return argv, CODEX_PREFACE + agent_prompt(agent) + "\n"
+        where = ", ".join(str(d) for d in _codex_skill_dirs(proot))
+        preface = (CODEX_PREFACE + f"Existing skills live under {where}; read <dir>/<name>/SKILL.md "
+                   "by absolute path, your working directory holds nothing.\n\n")
+        return argv, preface + agent_prompt(agent) + "\n"
     return build_command(agent=agent, claude_bin=claude_bin or config.CLAUDE_BIN), ""
 
 
@@ -274,15 +303,16 @@ def run(window_text, run_id, *, roots, repo_name=None, agent=None, claude_bin=No
     spec = (spec_path or config.FORMAT_SPEC).read_text(encoding="utf-8")
 
     carrier = carrier or config.REFLECTOR_CARRIER
-    if carrier == "fork" and session_id and layer.HARNESS != "codex":  # no session to fork -> bundle chain (fail-safe)
-        argv = build_fork_command(session_id=session_id, claude_bin=claude_bin or config.CLAUDE_BIN)
-        payload = build_fork_prompt(description_index(roots), spec)  # -p reads the prompt from stdin
-    else:
-        argv, preface = _carrier(agent or config.REFLECTOR_AGENT, run_id, proot, claude_bin)
-        payload = preface + build_bundle(window_text, description_index(roots), spec, digest=digest)
+    with _child_cwd() as cwd:
+        if carrier == "fork" and session_id and layer.HARNESS != "codex":  # no session to fork -> bundle chain (fail-safe)
+            argv = build_fork_command(session_id=session_id, claude_bin=claude_bin or config.CLAUDE_BIN)
+            payload = build_fork_prompt(description_index(roots), spec)  # -p reads the prompt from stdin
+        else:
+            argv, preface = _carrier(agent or config.REFLECTOR_AGENT, run_id, proot, claude_bin, cwd=cwd)
+            payload = preface + build_bundle(window_text, description_index(roots), spec, digest=digest)
 
-    env = child_env(run_id, proot)
-    proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, payload, run_id, roots)
+        env = child_env(run_id, proot)
+        proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, payload, run_id, roots)
     verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance=provenance)
     _record_spawn_failure(run_id, roots, proc, argv)
     return verdicts
@@ -317,9 +347,10 @@ def run_curator(run_id, *, roots, repo_name=None, agent=None, claude_bin=None,
     spec = (spec_path or config.FORMAT_SPEC).read_text(encoding="utf-8")
     bundle = build_curator_bundle(description_index(roots, agent_only=True), spec)
 
-    argv, preface = _carrier(agent or config.CURATOR_AGENT, run_id, roots.get(layer.PROJECT), claude_bin)
-    env = child_env(run_id, roots.get(layer.PROJECT))
-    proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, preface + bundle, run_id, roots)
+    with _child_cwd() as cwd:
+        argv, preface = _carrier(agent or config.CURATOR_AGENT, run_id, roots.get(layer.PROJECT), claude_bin, cwd=cwd)
+        env = child_env(run_id, roots.get(layer.PROJECT))
+        proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, preface + bundle, run_id, roots)
     verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance={"kind": "curator"})
     _record_spawn_failure(run_id, roots, proc, argv)
     return verdicts

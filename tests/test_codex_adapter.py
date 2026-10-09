@@ -347,6 +347,22 @@ def test_codex_child_has_a_closed_tool_set(codex, repo):
     assert argv.index("-s") + 1 == argv.index("read-only")
 
 
+def test_codex_child_runs_in_an_empty_temporary_cwd_named_nowhere_near_the_repo(codex, repo, tmp_path):
+    roots = {layer.PROJECT: repo / ".codex", layer.GLOBAL: tmp_path / "g"}
+    seen = {}
+
+    def fake(argv, env, payload):
+        cwd = Path(argv[argv.index("-C") + 1])
+        seen.update(cwd=cwd, existed=cwd.is_dir(), empty=not any(cwd.iterdir()), payload=payload)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    spawn.run("W", "run-5", roots=roots, session_id=SID, spawn_fn=fake)
+    assert seen["existed"] and seen["empty"]  # a project layer is discovered upward from cwd: there is none here
+    assert not seen["cwd"].is_relative_to(repo) and seen["cwd"] != repo
+    assert not seen["cwd"].exists()  # gone once the child exited
+    assert f"{repo / '.codex' / 'skills'}" in seen["payload"] and f"{repo / '.agents' / 'skills'}" in seen["payload"]
+
+
 def test_codex_carrier_without_model_leaves_the_configured_default():
     argv = spawn.build_codex_command(codex_bin="codex", run_id="r", proot="/p/.codex", cwd="/p", model="")
     assert "-m" not in argv
