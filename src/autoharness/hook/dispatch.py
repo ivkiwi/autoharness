@@ -127,7 +127,9 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
             pcount = counters.bump_request(layer.PROJECT, proot)
             drain_error = None
             try:
-                promoter.drain(config.INTERACTIVE_RUN_ID, roots=roots)  # /learn and other in-session proposals; no-op when empty
+                promoter.drain(config.INTERACTIVE_RUN_ID, roots=roots,  # /learn and other in-session proposals; no-op when empty
+                               provenance={"kind": "interactive", "session_id": event.get("session_id"),
+                                           "transcript_path": event.get("transcript_path")})
             except Exception as exc:  # the queue stays for the next Stop; this turn still counts and reflects
                 drain_error = f"{type(exc).__name__}: {exc}"
             result = on_stop.on_stop(event, root=proot)

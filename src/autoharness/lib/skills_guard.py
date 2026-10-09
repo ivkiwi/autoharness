@@ -30,6 +30,10 @@ FAMILIES = {
         r"\bmkfs\b",
         r"\bdd\s+if=.*of=/dev/",
         r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}",
+        # history and work-tree wipes: valid as a one-off cleanup, ruinous as a general rule
+        r"\bgit\s+clean\s+-\w*x",
+        r"\bgit\s+reset\s+--hard\b",
+        r"\bgit\s+push\b.*(--force(?!-with-lease)|\s-f\b)",
     ],
     "persistence": [
         r"\bcrontab\b",

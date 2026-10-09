@@ -32,6 +32,7 @@ import json
 import re
 
 from autoharness import config
+from autoharness.canon import queue as canon_queue
 from autoharness.lib import (
     atomic,
     counters,
@@ -296,18 +297,6 @@ def _account(run_id, intents, verdicts, proot):
     return record
 
 
-def _propose(run_id, intents, verdicts, proot):
-    """PROPOSE_ONLY keeps every intent whole, rejected ones too (a patch to a hand-written skill is
-    exactly what a shared gate needs to see), appended per run: the interactive run id recurs."""
-    p = layer.state_dir(layer.PROJECT, proot) / "proposals" / f"{run_id}.jsonl"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    torn = p.exists() and p.stat().st_size > 0 and ledger._last_byte(p) != b"\n"
-    with p.open("a", encoding="utf-8") as f:
-        f.write("\n" if torn else "")
-        for i, v in zip(intents, verdicts, strict=True):
-            f.write(json.dumps({"intent": i, "verdict": v}, ensure_ascii=False) + "\n")
-
-
 # the environment, not the intent: disk, quota, I/O, a read-only mount, transient pressure. Keep the
 # queue and retry. Any other OSError (permissions, a name too long, not a directory, ...) belongs to
 # this intent and would fail again on every Stop, wedging everything queued behind it.
@@ -335,7 +324,7 @@ def _promote_one(intent, roots, repo_name):
         return _reject(intent.get("action"), None, [("crash", f"{type(exc).__name__}: {exc}")])
 
 
-def drain(run_id, *, roots=None, repo_name=None):
+def drain(run_id, *, roots=None, repo_name=None, provenance=None):
     roots = roots or {}
     proot = roots.get(layer.PROJECT)
     # One drain per project root at a time. A hook is a short-lived process, so two passes on the same
@@ -350,7 +339,9 @@ def drain(run_id, *, roots=None, repo_name=None):
             intents = intent_queue.read(run_id, proot)
             verdicts = [_promote_one(i, roots, repo_name) for i in intents]
             if config.PROPOSE_ONLY and intents:
-                _propose(run_id, intents, verdicts, proot)  # before clear: a crash re-proposes, never loses
+                # every intent whole, rejected ones too (a patch to a hand-written skill is exactly what the
+                # shared gate needs), durable before clear: a crash re-proposes, the gate drops the replay
+                canon_queue.append(run_id, intents, verdicts, provenance=provenance, project_root=proot)
             record = _account(run_id, intents, verdicts, proot) if intents else None
             intent_queue.clear(run_id, proot)
     if record:

@@ -10,6 +10,7 @@ here: the reflector only appends intents, the promoter exclusively validates and
 
 ponytail: run() is the body of the "detached background job" (synchronous spawn→wait→drain); the "do not block the host Stop" detach is started in the background at the hook top level by the Phase 7 dispatch calling run(). spawn_fn is injectable (system tests use a fake reflector script in place of the real claude). Precise handling of the transcript upper-bound race (cap.md open) is still tolerated at v0.
 """
+import hashlib
 import json
 import logging
 import os
@@ -172,7 +173,7 @@ def _invoke_spawn(spawn_fn, argv, env, payload, run_id, roots):
 
 
 def run(window_text, run_id, *, roots, repo_name=None, agent=None, claude_bin=None,
-        spec_path=None, digest="", session_id=None, carrier=None, spawn_fn=None):
+        spec_path=None, digest="", session_id=None, carrier=None, spawn_fn=None, provenance=None):
     roots = roots or {}
     proot = roots.get(layer.PROJECT)
     spec = (spec_path or config.FORMAT_SPEC).read_text(encoding="utf-8")
@@ -188,7 +189,7 @@ def run(window_text, run_id, *, roots, repo_name=None, agent=None, claude_bin=No
 
     env = child_env(run_id, proot)
     proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, payload, run_id, roots)
-    verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name)
+    verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance=provenance)
     _record_spawn_failure(run_id, roots, proc, argv)
     return verdicts
 
@@ -226,7 +227,7 @@ def run_curator(run_id, *, roots, repo_name=None, agent=None, claude_bin=None,
                          claude_bin=claude_bin or config.CLAUDE_BIN)
     env = child_env(run_id, roots.get(layer.PROJECT))
     proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, bundle, run_id, roots)
-    verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name)
+    verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance={"kind": "curator"})
     _record_spawn_failure(run_id, roots, proc, argv)
     return verdicts
 
@@ -240,8 +241,11 @@ def main(argv=None):
     roots = {layer.PROJECT: Path(proot), layer.GLOBAL: Path(groot)}
     offset = counters.session_offset(session_id, roots[layer.PROJECT])
     window_text, new_offset = capture.window(transcript_path, offset)
+    provenance = {"kind": "reflector", "session_id": session_id, "transcript_path": transcript_path,
+                  "range": [offset, new_offset],
+                  "window_sha256": hashlib.sha256(window_text.encode("utf-8")).hexdigest()}
     result = run(window_text, run_id, roots=roots, session_id=session_id,
-                 digest=capture.digest(transcript_path, offset))
+                 digest=capture.digest(transcript_path, offset), provenance=provenance)
     counters.write_session_offset(session_id, new_offset, roots[layer.PROJECT])
     return result
 

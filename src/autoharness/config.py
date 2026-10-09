@@ -118,3 +118,11 @@ RUN_ID_ENV = "AUTOHARNESS_RUN_ID"           # spawn injects the intent-queue run
 # and the shipped learn skill could never land anything. The main session's Stop drains this queue.
 INTERACTIVE_RUN_ID = "interactive"
 PROJECT_ROOT_ENV = layer.PROJECT_ROOT_ENV  # same: the project layer root, where the queue is persisted (layer resolves it)
+
+
+# the shared canon gate (one queue, one journal, one set of releases for every harness on this host)
+HARNESS = os.environ.get("AUTOHARNESS_HARNESS", "claude")  # who wrote a queued proposal: claude | codex
+GATE_DIR = Path(os.environ.get("AUTOHARNESS_GATE_DIR") or Path.home() / ".agents" / "skill-gate")
+CANON_ROOT = Path(os.environ.get("AUTOHARNESS_CANON_ROOT") or Path.home() / ".agents")  # skills/, skill-releases/
+# other harnesses' skill roots: a new canon name must be free in every place a harness discovers skills
+HOST_SKILL_ROOTS = [Path.home() / ".claude" / "skills", Path.home() / ".codex" / "skills"]

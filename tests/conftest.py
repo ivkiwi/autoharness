@@ -34,3 +34,17 @@ def _no_real_notifier(monkeypatch):
     # Slack hook, desktop popups) would fire for every drain the suite runs
     monkeypatch.setattr(config, "NOTIFY", "")
     monkeypatch.setattr(config, "NOTIFY_CMD", "")
+
+
+@pytest.fixture(autouse=True)
+def _private_gate_and_flags(monkeypatch, tmp_path_factory):
+    # the shared canon gate defaults to ~/.agents: a test must never queue into or publish over the real
+    # one. The phase-1 flags are read from env at import, so pin them too: an operator's own setting
+    # leaking into the run would flip half the suite
+    gate = tmp_path_factory.mktemp("gate")
+    monkeypatch.setattr(config, "GATE_DIR", gate / "skill-gate")
+    monkeypatch.setattr(config, "CANON_ROOT", gate / "agents")
+    monkeypatch.setattr(config, "HOST_SKILL_ROOTS", [gate / "claude-skills", gate / "codex-skills"])
+    monkeypatch.setattr(config, "HARNESS", "claude")
+    monkeypatch.setattr(config, "PROPOSE_ONLY", False)
+    monkeypatch.setattr(config, "DISABLE_GLOBAL", False)

@@ -32,7 +32,7 @@ def propose_only(monkeypatch):
 
 
 def _proposals(roots, run_id):
-    p = layer.state_dir(layer.PROJECT, roots[layer.PROJECT]) / "proposals" / f"{run_id}.jsonl"
+    p = config.GATE_DIR / "queue" / f"{run_id}.jsonl"
     return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()]
 
 
@@ -82,7 +82,7 @@ def test_default_mode_still_lands_and_writes_no_proposals(roots):
     [verdict] = promoter.drain("run1", roots=roots)
     assert verdict["ok"] and "proposed" not in verdict
     assert skill_store.exists(layer.PROJECT, "foo", proot)
-    assert not (layer.state_dir(layer.PROJECT, proot) / "proposals").exists()
+    assert not (config.GATE_DIR / "queue").exists()
 
 
 def test_session_start_proposes_archive_instead_of_archiving(roots, propose_only, monkeypatch):
