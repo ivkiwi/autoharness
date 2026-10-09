@@ -297,3 +297,13 @@ def test_index_no_read_hint_without_project_skills(tmp_path):
     worktree.mkdir()
     ctx = on_session_start.on_session_start({"cwd": str(worktree)}, roots=roots)["context"]
     assert "g-skill" in ctx and "Read " not in ctx
+
+
+def test_a_users_skill_with_a_windows_reserved_name_does_not_break_session_start(tmp_path):
+    roots = _roots(tmp_path)
+    _seed_desc(roots, "foo", "use when testing the index")
+    user = roots["project"] / "skills" / "con"
+    user.mkdir(parents=True)
+    (user / "SKILL.md").write_text("---\nname: con\ndescription: mine\n---\nb")
+    out = on_session_start.on_session_start(roots=roots)
+    assert "- foo [project]" in out["context"]

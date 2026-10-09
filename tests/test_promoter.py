@@ -507,3 +507,10 @@ def test_run_account_carries_uncategorized_count(tmp_path):
     assert last["uncategorized"] == 1  # only the one that landed without a category
     rows = json.loads((layer.state_dir("project", proot) / "runs" / "run-cat.json").read_text())["verdicts"]
     assert {r["name"]: r.get("notes") for r in rows}["uncat"] == ["category"]
+
+
+def test_create_with_an_unusable_name_is_rejected_cleanly(tmp_path):
+    roots = _roots(tmp_path)
+    for bad in ["a" * 256, "con"]:
+        v = promoter.promote(_create(name=bad, body=GOOD_BODY.replace("name: foo", f"name: {bad}")), roots=roots)
+        assert not v["ok"] and "shape" in _families(v), bad

@@ -107,7 +107,7 @@ def check_files(files):
     total = 0
     for rel, content in files.items():
         try:
-            layer.check_subfile(rel)
+            layer.check_subfile(rel, new=True)
         except ValueError as exc:
             findings.append(("files", str(exc)))
             continue
