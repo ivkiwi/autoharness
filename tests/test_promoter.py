@@ -555,6 +555,22 @@ def test_drain_accounts_an_oserror_that_belongs_to_the_intent(tmp_path, monkeypa
     assert intent_queue.read("r1", proot) == []
 
 
+def test_drain_keeps_the_queue_when_windows_reports_a_locked_file(tmp_path, monkeypatch):
+    # a sharing violation (another process has the file open) arrives as EACCES: transient, retry it
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("r1", _create(), proot)
+
+    def locked(*a, **k):
+        exc = PermissionError(errno.EACCES, "The process cannot access the file")
+        exc.winerror = 32
+        raise exc
+    monkeypatch.setattr(promoter, "promote", locked)
+    with pytest.raises(PermissionError):
+        promoter.drain("r1", roots=roots)
+    assert intent_queue.read("r1", proot)  # kept for the next drain
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="NAME_MAX semantics are POSIX")
 def test_drain_does_not_wedge_on_a_name_the_filesystem_refuses(tmp_path):
     roots = _roots(tmp_path)

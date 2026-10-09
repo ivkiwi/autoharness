@@ -247,6 +247,13 @@ def _account(run_id, intents, verdicts, proot):
 # this intent and would fail again on every Stop, wedging everything queued behind it.
 _ENVIRONMENTAL_ERRNOS = {getattr(errno, n) for n in ("ENOSPC", "EDQUOT", "EIO", "EROFS", "EAGAIN", "EINTR",
                                                       "EBUSY", "ENFILE", "EMFILE") if hasattr(errno, n)}
+# Windows reports another process holding the file (sharing / lock violation) as EACCES: transient too
+_ENVIRONMENTAL_WINERRORS = {32, 33}
+
+
+def _environmental(exc):
+    return isinstance(exc, OSError) and (exc.errno in _ENVIRONMENTAL_ERRNOS
+                                         or getattr(exc, "winerror", None) in _ENVIRONMENTAL_WINERRORS)
 
 
 def _promote_one(intent, roots, repo_name):
@@ -255,7 +262,7 @@ def _promote_one(intent, roots, repo_name):
     try:
         return promote(intent, roots=roots, repo_name=repo_name)
     except Exception as exc:
-        if isinstance(exc, OSError) and exc.errno in _ENVIRONMENTAL_ERRNOS:
+        if _environmental(exc):
             raise  # keep the queue so the next drain retries it
         # a malformed or unlandable intent: account it once instead of replaying it on every Stop
         return _reject(intent.get("action"), None, [("crash", f"{type(exc).__name__}: {exc}")])
