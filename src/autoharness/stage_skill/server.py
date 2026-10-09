@@ -130,7 +130,7 @@ def _content_errors(params):
     if len(body.encode("utf-8")) > config.STAGE_MAX_BODY_BYTES:
         errors.append(("size", f"body exceeds {config.STAGE_MAX_BODY_BYTES} bytes"))
     files = params.get("files")
-    errors += validate.check_files(files)
+    errors += validate.check_files(files, creating=params["action"] == "create")
     errors += validate.structure(body, files)
     if params.get("action") in ("create", "update"):
         # The promoter is the authority, but it runs after this session is gone: a description gate

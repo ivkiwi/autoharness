@@ -514,3 +514,19 @@ def test_create_with_an_unusable_name_is_rejected_cleanly(tmp_path):
     for bad in ["a" * 256, "con"]:
         v = promoter.promote(_create(name=bad, body=GOOD_BODY.replace("name: foo", f"name: {bad}")), roots=roots)
         assert not v["ok"] and "shape" in _families(v), bad
+
+
+def test_update_can_still_rewrite_an_existing_legacy_subfile(tmp_path):
+    # the new-name limits are for names being created; a skill's existing references/aux.md stays updatable
+    roots = _roots(tmp_path)
+    body = GOOD_BODY + "See references/aux.md for the notes\n"
+    assert promoter.promote(_create(body=GOOD_BODY), roots=roots)["ok"]
+    legacy = layer.symbol_dir("project", "foo", roots["project"]) / "references" / "aux.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("old\n")
+    upd = {"action": "update", "name": "foo", "body": body, "files": {"references/aux.md": "new\n"},
+           "reason": "r", "evidence": "e"}
+    v = promoter.promote(upd, roots=roots)
+    assert v["ok"], v["findings"]
+    bad = {**upd, "files": {"references/nul.md": "x\n"}, "body": GOOD_BODY + "See references/nul.md for the notes\n"}
+    assert "files" in _families(promoter.promote(bad, roots=roots))  # a new reserved name is still refused
