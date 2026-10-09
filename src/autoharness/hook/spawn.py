@@ -379,22 +379,31 @@ def main(argv=None):
         outcome["returncode"] = getattr(proc, "returncode", 0)
         return proc
 
-    result = run(window_text, run_id, roots=roots, session_id=session_id,
-                 digest=capture.digest(transcript_path, offset), provenance=provenance,
-                 spawn_fn=spawn_and_remember)
+    try:
+        result = run(window_text, run_id, roots=roots, session_id=session_id,
+                     digest=capture.digest(transcript_path, offset), provenance=provenance,
+                     spawn_fn=spawn_and_remember)
+    except OSError:  # the child could not even start (no binary): that spends the limit like a refusal
+        _window_not_fed(session_id, new_offset, roots[layer.PROJECT])
+        raise
     if outcome.get("returncode", 0) != 0:
-        # not consumed (a refusal before the model counts): the watermark and the note stay, unless the
-        # child has now failed REFLECT_MAX_FAILURES times on this window — then the window is given up
-        # explicitly rather than fed forever
-        proot = roots[layer.PROJECT]
-        if layer.HARNESS == "codex" and tails.fail(session_id, proot) >= config.REFLECT_MAX_FAILURES:
-            counters.write_session_offset(session_id, new_offset, proot)
-            tails.give_up(session_id, f"reflection_failed_{config.REFLECT_MAX_FAILURES}x", new_offset, proot)
+        _window_not_fed(session_id, new_offset, roots[layer.PROJECT])
         return result
     counters.write_session_offset(session_id, new_offset, roots[layer.PROJECT])
     if layer.HARNESS == "codex":
         tails.settle(session_id, launched_from, new_offset, roots[layer.PROJECT])
     return result
+
+
+def _window_not_fed(session_id, new_offset, proot):
+    """The child did not consume the window (a refusal before the model, a launch error): the
+    watermark and the note stay, unless the child has now failed REFLECT_MAX_FAILURES times on this
+    window — then the window is given up explicitly rather than fed forever."""
+    if layer.HARNESS != "codex":
+        return
+    if tails.fail(session_id, proot) >= config.REFLECT_MAX_FAILURES:
+        counters.write_session_offset(session_id, new_offset, proot)
+        tails.give_up(session_id, f"reflection_failed_{config.REFLECT_MAX_FAILURES}x", new_offset, proot)
 
 
 if __name__ == "__main__":

@@ -252,6 +252,52 @@ def test_chronic_child_failure_gives_the_window_up(codex, repo, tmp_path, monkey
     assert note["offset"] == transcript.stat().st_size == counters.session_offset(SID, repo / ".codex")  # given up, moved on
 
 
+def test_launch_errors_spend_the_failure_limit_too(codex, repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "REFLECT_MAX_FAILURES", 3, raising=False)
+    transcript = Path(_rollout(tmp_path / "rollout.jsonl"))
+    for i in range(config.REFLECT_EVERY_N):
+        _tool(repo, str(transcript), i)
+    _stop(repo, str(transcript))
+
+    def no_binary(argv, env, payload):
+        raise OSError("codex: No such file or directory")
+
+    for streak in (1, 2):
+        with pytest.raises(OSError):
+            _confirm_reflection(transcript, repo, tmp_path, child=no_binary)
+        [note] = tails.pending(repo / ".codex")
+        assert note["failures"] == streak and "coverage_gap" not in note
+        assert counters.session_offset(SID, repo / ".codex") == 0
+    with pytest.raises(OSError):
+        _confirm_reflection(transcript, repo, tmp_path, child=no_binary)
+    [note] = tails.pending(repo / ".codex")
+    assert note["coverage_gap"] == "reflection_failed_3x"
+    assert counters.session_offset(SID, repo / ".codex") == transcript.stat().st_size
+
+
+def test_stops_between_failures_keep_the_streak_of_the_same_window(codex, repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "REFLECT_MAX_FAILURES", 3, raising=False)
+    transcript = Path(_rollout(tmp_path / "rollout.jsonl"))
+    refused = lambda argv, env, payload: SimpleNamespace(returncode=2, stderr="MCP tool call requires approval")  # noqa: E731
+    for streak in (1, 2, 3):
+        for i in range(config.REFLECT_EVERY_N):  # the host keeps working: each Stop rewrites the note
+            _tool(repo, str(transcript), i)
+        _stop(repo, str(transcript))  # triggered: a fresh note for the same unconfirmed watermark
+        _tool(repo, str(transcript), 99)
+        _stop(repo, str(transcript))  # below the cadence: another fresh note
+        _confirm_reflection(transcript, repo, tmp_path, child=refused)
+        [note] = tails.pending(repo / ".codex")
+        if streak < 3:
+            assert note["failures"] == streak and "coverage_gap" not in note  # 1, 2 — not 1, 1, 1
+            assert counters.session_offset(SID, repo / ".codex") == 0
+    assert note["coverage_gap"] == "reflection_failed_3x" and note["failures"] == 0
+    assert counters.session_offset(SID, repo / ".codex") == transcript.stat().st_size
+    _tool(repo, str(transcript), 100)
+    _stop(repo, str(transcript))  # a new window past the given-up one starts a clean note
+    [note] = tails.pending(repo / ".codex")
+    assert "failures" not in note and "coverage_gap" not in note
+
+
 def test_tail_note_and_settle_share_one_lock(codex, repo, tmp_path, monkeypatch):
     root = repo / ".codex"
     tails.note(SID, "/t.jsonl", 50, root)  # note A

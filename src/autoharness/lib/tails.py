@@ -48,6 +48,9 @@ def note(session_id, transcript_path, count, root=None, *, gap=None):
     if gap:
         data["coverage_gap"] = gap
     with _locked(session_id, root):
+        current = _read(p)
+        if current and current.get("offset") == data["offset"] and current.get("failures"):
+            data["failures"] = current["failures"]  # the same unconfirmed window: its streak goes on
         _write(p, data)
     return data
 
