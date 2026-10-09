@@ -298,6 +298,34 @@ def test_stops_between_failures_keep_the_streak_of_the_same_window(codex, repo, 
     assert "failures" not in note and "coverage_gap" not in note
 
 
+def test_a_successful_reflection_ends_the_streak_for_the_newer_note(codex, repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "REFLECT_MAX_FAILURES", 3, raising=False)
+    transcript = Path(_rollout(tmp_path / "rollout.jsonl"))
+    refused = lambda argv, env, payload: SimpleNamespace(returncode=2, stderr="MCP tool call requires approval")  # noqa: E731
+    for i in range(config.REFLECT_EVERY_N):
+        _tool(repo, str(transcript), i)
+    _stop(repo, str(transcript))
+    for _ in range(2):
+        _confirm_reflection(transcript, repo, tmp_path, child=refused)
+    assert tails.pending(repo / ".codex")[0]["failures"] == 2
+
+    def succeeds_while_a_stop_happens(argv, env, payload):
+        transcript.write_text(transcript.read_text(encoding="utf-8") + '{"type": "event_msg"}\n', encoding="utf-8")
+        _tool(repo, str(transcript), 99)
+        _stop(repo, str(transcript))  # note B, written on the still-unconfirmed watermark: it inherits the streak
+        return SimpleNamespace(returncode=0, stderr="")
+
+    size_before = transcript.stat().st_size
+    _confirm_reflection(transcript, repo, tmp_path, child=succeeds_while_a_stop_happens)
+    [note] = tails.pending(repo / ".codex")
+    assert note["offset"] == size_before and "failures" not in note  # A consumed its window: B starts clean
+
+    _confirm_reflection(transcript, repo, tmp_path, child=refused)  # the new window's first refusal is the first
+    [note] = tails.pending(repo / ".codex")
+    assert note["failures"] == 1 and "coverage_gap" not in note
+    assert counters.session_offset(SID, repo / ".codex") == size_before
+
+
 def test_tail_note_and_settle_share_one_lock(codex, repo, tmp_path, monkeypatch):
     root = repo / ".codex"
     tails.note(SID, "/t.jsonl", 50, root)  # note A

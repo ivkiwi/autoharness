@@ -82,6 +82,7 @@ def settle(session_id, version, offset, root=None):
             p.unlink(missing_ok=True)
             return
         current["offset"] = int(offset)
+        current.pop("failures", None)  # the streak belonged to the window just consumed, not to this one
         _write(p, current)
 
 
