@@ -116,7 +116,8 @@ def last_run_summary(roots):
         except OSError:
             pass
     line = (f"autoharness last run: landed {last.get('landed', 0)}, "
-            f"rejected {last.get('rejected', 0)}")
+            + (f"proposed {last['proposed']}, " if last.get("proposed") else "")
+            + f"rejected {last.get('rejected', 0)}")
     families = last.get("families")
     if isinstance(families, list) and families and all(isinstance(f, str) for f in families):
         line += f" ({', '.join(families)})"
@@ -148,7 +149,7 @@ def on_session_start(event=None, *, roots=None):
         # beside the parent, or get a second index on top of its bundle
         return {"archived": {}, "context": None, "reason": "recursion_guard"}
     roots = roots or {}
-    archived = {}
+    archived, proposed_archive = {}, {}
     for lyr in config.active_layers():
         root = roots.get(lyr)
         names = lifecycle.evaluate(
@@ -156,9 +157,13 @@ def on_session_start(event=None, *, roots=None):
             maturity=config.MATURITY_THRESHOLD[lyr], capacity=config.CAPACITY[lyr],
             review_suspended=config.GRADUATION_REVIEW_SUSPENDED,
         )
+        if config.PROPOSE_ONLY:  # the archive is a delete in effect: propose it, do not perform it
+            proposed_archive[lyr] = names
+            continue
         for name in names:
             skill_store.archive(lyr, name, root)
         archived[lyr] = names
     parts = [last_run_summary(roots), recall_index(roots, (event or {}).get("cwd"))]  # index built after archiving
     context = "\n\n".join(p for p in parts if p) or None
-    return {"archived": archived, "context": context}
+    result = {"archived": archived, "context": context}
+    return {**result, "proposed_archive": proposed_archive} if config.PROPOSE_ONLY else result

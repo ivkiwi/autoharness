@@ -43,11 +43,14 @@ def _listing(items):
 
 def summary(rows):
     """One line naming what the run did: 'create foo, patch bar · rejected: baz'."""
-    landed = [f"{r.get('action')} {_clean(r.get('name'))}" for r in rows if r.get("ok")]
+    landed = [f"{r.get('action')} {_clean(r.get('name'))}" for r in rows if r.get("ok") and not r.get("proposed")]
+    proposed = [f"{r.get('action')} {_clean(r.get('name'))}" for r in rows if r.get("proposed")]
     rejected = [_clean(r.get("name")) for r in rows if not r.get("ok")]
     parts = []
     if landed:
         parts.append(_listing(landed))
+    if proposed:
+        parts.append("proposed: " + _listing(proposed))
     if rejected:
         parts.append("rejected: " + _listing(rejected))
     return " · ".join(parts)

@@ -64,6 +64,9 @@ def _bool_env(name, default):
 
 INDEX_SUSPENDED = _bool_env("AUTOHARNESS_INDEX_SUSPENDED", False)
 DISABLE_GLOBAL = _bool_env("AUTOHARNESS_DISABLE_GLOBAL", False)
+# phase 1 of a shared publishing gate: every intent is still validated, but nothing lands and the
+# lifecycle archives nothing; intents with their verdicts go to proposals/ for that gate to decide
+PROPOSE_ONLY = _bool_env("AUTOHARNESS_PROPOSE_ONLY", False)
 
 
 def active_layers():

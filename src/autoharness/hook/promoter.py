@@ -222,6 +222,9 @@ def promote(intent, *, roots=None, repo_name=None):
     )
     if not verdict["ok"]:
         return _reject(action, level, verdict["findings"])
+    if config.PROPOSE_ONLY:
+        return {"ok": True, "action": action, "level": level, "findings": [], "notes": _notes(action, body),
+                "proposed": True}
 
     try:
         _land(action, intent, body, level, name, root)
@@ -255,9 +258,11 @@ def _account(run_id, intents, verdicts, proot):
     facts, so a rejected create would vanish without trace — this account is where verdicts live.
     last_run.json feeds the one-line SessionStart summary and is consumed after one injection."""
     rows = [{"action": v.get("action"), "name": i.get("name"), "ok": v["ok"],
-             "findings": [f[0] for f in v.get("findings", [])], "notes": v.get("notes", [])}
+             "findings": [f[0] for f in v.get("findings", [])], "notes": v.get("notes", []),
+             **({"proposed": True} if v.get("proposed") else {})}
             for i, v in zip(intents, verdicts, strict=True)]
-    landed = sum(1 for r in rows if r["ok"])
+    proposed = sum(1 for r in rows if r.get("proposed"))
+    landed = sum(1 for r in rows if r["ok"]) - proposed
     absorbed = sum(1 for i, v in zip(intents, verdicts, strict=True)
                    if v["ok"] and i.get("action") == "delete" and i.get("absorbed_into"))
     families = sorted({f for r in rows if not r["ok"] for f in r["findings"]})
@@ -267,12 +272,24 @@ def _account(run_id, intents, verdicts, proot):
     record = {"run_id": run_id, "verdicts": rows}
     atomic.write_text(runs / f"{run_id}.json", json.dumps(record, ensure_ascii=False, indent=2))
     atomic.write_text(state / "last_run.json",
-                      json.dumps({"run_id": run_id, "landed": landed,
-                                  "rejected": len(rows) - landed, "absorbed": absorbed,
+                      json.dumps({"run_id": run_id, "landed": landed, "proposed": proposed,
+                                  "rejected": len(rows) - landed - proposed, "absorbed": absorbed,
                                   "families": families,
                                   "uncategorized": sum(1 for r in rows if "category" in r["notes"])},
                                  ensure_ascii=False))
     return record
+
+
+def _propose(run_id, intents, verdicts, proot):
+    """PROPOSE_ONLY keeps every intent whole, rejected ones too (a patch to a hand-written skill is
+    exactly what a shared gate needs to see), appended per run: the interactive run id recurs."""
+    p = layer.state_dir(layer.PROJECT, proot) / "proposals" / f"{run_id}.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    torn = p.exists() and p.stat().st_size > 0 and ledger._last_byte(p) != b"\n"
+    with p.open("a", encoding="utf-8") as f:
+        f.write("\n" if torn else "")
+        for i, v in zip(intents, verdicts, strict=True):
+            f.write(json.dumps({"intent": i, "verdict": v}, ensure_ascii=False) + "\n")
 
 
 # the environment, not the intent: disk, quota, I/O, a read-only mount, transient pressure. Keep the
@@ -315,6 +332,8 @@ def drain(run_id, *, roots=None, repo_name=None):
         with intent_queue.locked(run_id, proot):  # a live /learn or reflector appends after we clear
             intents = intent_queue.read(run_id, proot)
             verdicts = [_promote_one(i, roots, repo_name) for i in intents]
+            if config.PROPOSE_ONLY and intents:
+                _propose(run_id, intents, verdicts, proot)  # before clear: a crash re-proposes, never loses
             record = _account(run_id, intents, verdicts, proot) if intents else None
             intent_queue.clear(run_id, proot)
     if record:
