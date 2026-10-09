@@ -436,3 +436,22 @@ def test_a_heading_inside_a_code_fence_is_not_a_section():
     text = "# Only after approval\n```\n# Routine actions\n```\nPost the report to Slack.\n"
     [(chain, _)] = select._contexts(text, select._authority).keys()
     assert chain == ("Only after approval",)
+
+
+def test_a_shorter_inner_fence_does_not_close_a_longer_one():
+    text = "# Only after approval\n````\n```python\nx = 1\n```\n````\nPost the report to Slack.\n"
+    [(chain, _)] = select._contexts(text, select._authority).keys()
+    assert chain == ("Only after approval",)
+
+
+def test_restructuring_a_sensitive_skill_fails_closed():
+    _skill(release.skills_dir(), "foo", BODY.format(name="foo")
+           + "# Only after approval\nPost the report to Slack.\n# Notes\nFormat the date.\n")
+    row = _row(action="patch", old_string="# Notes\n", new_string="## Notes\n")  # harmless, but structural
+    assert select.classify(row) == ("out_of_phase", "authority")
+
+
+def test_restructuring_a_plain_skill_is_fine():
+    _skill(release.skills_dir(), "foo", BODY.format(name="foo") + "# Notes\nFormat the date.\n")
+    row = _row(action="patch", old_string="# Notes\n", new_string="## Notes\n")
+    assert select.classify(row)[0] == "eligible"

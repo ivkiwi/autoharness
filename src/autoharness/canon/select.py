@@ -142,7 +142,9 @@ def classify(row):
 
 _ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)")
 _SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# any line that can shape sections: a heading, an underline, a fence. Deliberately over-inclusive.
+_STRUCTURAL = re.compile(r"^\s{0,3}(#|=+\s*$|-+\s*$|`{3,}|~{3,})")
 
 
 def _contexts(text, pattern):
@@ -156,12 +158,14 @@ def _contexts(text, pattern):
     for line in lines:
         stripped = line.strip()
         opener = _FENCE.match(line)
-        if fence:
-            fence = None if opener and opener.group(1)[0] == fence else fence
+        if fence:  # CommonMark: closed only by the same character, at least as long, with nothing after it
+            if opener and opener.group(1)[0] == fence[0] and len(opener.group(1)) >= len(fence) \
+                    and not opener.group(2).strip():
+                fence = None
             prev = None
             continue
         if opener:
-            fence, prev = opener.group(1)[0], None
+            fence, prev = opener.group(1), None
             continue
         atx, setext = _ATX.match(line), _SETEXT.match(line)
         if atx:
@@ -200,8 +204,12 @@ def check_change(intent, baseline, body, project_root=None, base_dir=None):
     if findings:
         return "invalid:" + ",".join(sorted(findings))
     restrictions_lost = _contexts(baseline, RESTRICTION.search) - _contexts(body, RESTRICTION.search)
+    # fail closed on structure: with any authority or restriction line in the skill, a change that touches
+    # a heading, an underline or a fence is not judged by a parser that might be fooled; it waits
+    sensitive = any(_authority(x) or RESTRICTION.search(x) for x in (baseline + "\n" + body).splitlines())
+    restructured = any(_STRUCTURAL.match(x) for x in (added + "\n" + removed).splitlines() if x.strip())
     if skills_guard.scan(body) or any(p.search(added) or p.search(removed) for p in AUTHORITY) \
-            or RESTRICTION.search(removed) or restrictions_lost \
+            or RESTRICTION.search(removed) or restrictions_lost or (sensitive and restructured) \
             or _contexts(baseline, _authority) != _contexts(body, _authority):
         return "authority"
     return None
