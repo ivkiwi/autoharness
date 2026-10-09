@@ -1,4 +1,7 @@
 import json
+import threading
+
+import pytest
 
 from autoharness.hook import promoter
 from autoharness.lib import counters, intent_queue, layer, ledger, sidecar, skill_store
@@ -507,3 +510,75 @@ def test_run_account_carries_uncategorized_count(tmp_path):
     assert last["uncategorized"] == 1  # only the one that landed without a category
     rows = json.loads((layer.state_dir("project", proot) / "runs" / "run-cat.json").read_text())["verdicts"]
     assert {r["name"]: r.get("notes") for r in rows}["uncat"] == ["category"]
+
+
+def test_drain_accounts_a_malformed_intent_once_and_lands_the_rest(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("r1", _create(), proot)
+    intent_queue.append("r1", {"action": "patch", "name": "foo", "old_string": 5, "new_string": ["x"],
+                               "reason": "r", "evidence": "e"}, proot)  # bypassed stage_skill's schema
+    with (layer.state_dir("project", proot) / "intents" / "r1.jsonl").open("a") as f:
+        f.write('{"torn": \n')
+    intent_queue.append("r1", _create(name="bar", body=GOOD_BODY.replace("name: foo", "name: bar")), proot)
+    verdicts = promoter.drain("r1", roots=roots)
+    assert [v["ok"] for v in verdicts] == [True, False, False, True]
+    assert verdicts[1]["findings"][0][0] == "crash" and "TypeError" in verdicts[1]["findings"][0][1]
+    assert verdicts[2]["findings"][0][0] == "queue"
+    assert skill_store.exists("project", "bar", proot)  # intents after the bad ones still land
+    assert intent_queue.read("r1", proot) == []  # cleared: the next drain does not replay the garbage
+
+
+def test_drain_crash_verdict_for_an_intent_that_raises(tmp_path, monkeypatch):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("r1", _create(), proot)
+    monkeypatch.setattr(promoter, "promote", lambda *a, **k: (_ for _ in ()).throw(TypeError("bad delta")))
+    verdicts = promoter.drain("r1", roots=roots)
+    assert verdicts[0]["findings"] == [("crash", "TypeError: bad delta")]
+    assert intent_queue.read("r1", proot) == []
+
+
+def test_drain_keeps_the_queue_on_an_environmental_error(tmp_path, monkeypatch):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("r1", _create(), proot)
+
+    def disk_full(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(promoter, "promote", disk_full)
+    with pytest.raises(OSError):
+        promoter.drain("r1", roots=roots)
+    assert intent_queue.read("r1", proot)  # kept: the next drain retries it
+
+
+def test_drain_waits_for_an_append_in_flight(tmp_path):
+    # a stage_skill append caught mid-line must not read as a torn line and be cleared away
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    q = layer.state_dir("project", proot) / "intents" / "r1.jsonl"
+    q.parent.mkdir(parents=True)
+    line = json.dumps(_create()) + "\n"
+    started, go = threading.Event(), threading.Event()
+
+    def writer():
+        with intent_queue.locked("r1", proot), q.open("a", encoding="utf-8") as f:
+            f.write(line[:30])
+            f.flush()
+            started.set()
+            go.wait(5)
+            f.write(line[30:])
+
+    w = threading.Thread(target=writer)
+    w.start()
+    assert started.wait(5)
+    out = {}
+    d = threading.Thread(target=lambda: out.update(v=promoter.drain("r1", roots=roots)))
+    d.start()
+    d.join(0.3)
+    assert d.is_alive()  # waiting on the append lock, not reading half a line
+    go.set()
+    w.join(5)
+    d.join(5)
+    assert [v["ok"] for v in out["v"]] == [True]
+    assert skill_store.exists("project", "foo", proot)

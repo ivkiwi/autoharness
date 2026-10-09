@@ -241,6 +241,17 @@ def _account(run_id, intents, verdicts, proot):
     return record
 
 
+def _promote_one(intent, roots, repo_name):
+    if intent_queue.UNREADABLE in intent:
+        return _reject(None, None, [("queue", f"unreadable queue line: {intent[intent_queue.UNREADABLE]!r}")])
+    try:
+        return promote(intent, roots=roots, repo_name=repo_name)
+    except OSError:
+        raise  # environmental (disk, permissions): keep the queue so the next drain retries it
+    except Exception as exc:  # a malformed intent: account it once instead of replaying it on every Stop
+        return _reject(intent.get("action"), None, [("crash", f"{type(exc).__name__}: {exc}")])
+
+
 def drain(run_id, *, roots=None, repo_name=None):
     roots = roots or {}
     proot = roots.get(layer.PROJECT)
@@ -251,10 +262,11 @@ def drain(run_id, *, roots=None, repo_name=None):
     # the account comment below used to leave open to an external writer.
     with lock.file_lock(layer.state_dir(layer.PROJECT, proot) / "drain.lock"):
         sweep(roots)
-        intents = intent_queue.read(run_id, proot)
-        verdicts = [promote(i, roots=roots, repo_name=repo_name) for i in intents]
-        record = _account(run_id, intents, verdicts, proot) if intents else None
-        intent_queue.clear(run_id, proot)
+        with intent_queue.locked(run_id, proot):  # a live /learn or reflector appends after we clear
+            intents = intent_queue.read(run_id, proot)
+            verdicts = [_promote_one(i, roots, repo_name) for i in intents]
+            record = _account(run_id, intents, verdicts, proot) if intents else None
+            intent_queue.clear(run_id, proot)
     if record:
         # after clear and outside the lock: the notification is fire-and-forget and must not hold
         # the next pass out of the state dir
