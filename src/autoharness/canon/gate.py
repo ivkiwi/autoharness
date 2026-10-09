@@ -105,10 +105,12 @@ def _load(path, default):
 
 def _append(path, entry):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    with path.open("a+b") as f:
+        f.seek(0, 2)
+        torn = f.tell() > 0 and (f.seek(-1, 2), f.read(1))[1] != b"\n"
+        f.write((b"\n" if torn else b"") + (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8"))
         f.flush()
-        os.fsync(f.fileno())
+        os.fsync(f.fileno())  # a torn tail must not swallow a notice or a decision
 
 
 def _lines(path):
@@ -257,8 +259,14 @@ def decide(cases, baseline_answers, candidate_answers):
     return ("publish" if gained else "no_action"), detail
 
 
-def _decisions():
-    return {e["id"] for e in _lines(config.GATE_DIR / "decisions.jsonl") if isinstance(e.get("id"), str)}
+def _decisions(only=None):
+    return {e["id"] for e in _lines(config.GATE_DIR / "decisions.jsonl")
+            if isinstance(e.get("id"), str) and (only is None or e.get("decision") == only)}
+
+
+def _published_events():
+    return {tx["event_id"] for tx in release.journal_entries()
+            if tx.get("op") == "committed" and tx.get("kind") == "publish" and isinstance(tx.get("event_id"), str)}
 
 
 def _notify(event_id, text):
@@ -278,9 +286,10 @@ def _decide(row, decision, **extra):
 
 
 def _reconcile(rows):
-    """A publish that committed before the pass recorded its decision gets its notice and decision now."""
+    """A publish that committed is finalized as published, notice included, whatever was decided for it
+    before (a crash, or a failure after the switch counted as an error)."""
     by_id = {r["id"]: r for r in rows}
-    decided = _decisions()
+    decided = _decisions(only="published")
     for tx in release.journal_entries():
         if tx.get("op") == "committed" and tx.get("kind") == "publish" and tx.get("event_id") in by_id \
                 and tx["event_id"] not in decided:
@@ -304,7 +313,7 @@ def evaluate(row, runner=claude_runner):
         body = select.candidate_body(intent, baseline)
     except (KeyError, ValueError) as exc:
         return _decide(row, "out_of_phase", reason=f"delta:{exc}")
-    reason = select.check_change(intent, baseline, body, row.get("project_root"))
+    reason = select.check_change(intent, baseline, body, row.get("project_root"), base_dir=frozen)
     if reason:
         return _decide(row, "out_of_phase", reason=reason)
     _reserve_candidate(row["id"])
@@ -353,7 +362,7 @@ def run_once(runner=claude_runner):
         release.recover()
         rows = queue.read()
         _reconcile(rows)
-        decided = _decisions()
+        decided = _decisions() | _published_events()
         for row in rows:
             if row["id"] in decided:
                 continue
@@ -371,6 +380,8 @@ def run_once(runner=claude_runner):
             except release.Conflict as exc:
                 return _decide(row, "conflict", reason=str(exc))
             except (ValueError, KeyError, TypeError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                if row["id"] in _published_events():
+                    return None  # the switch committed: the next pass finalizes it, no attempt counted
                 # a malformed reply or a failed call: retry on later passes, but never let one row wedge the queue
                 if _attempt(row["id"]) >= config.GATE_MAX_ATTEMPTS:
                     return _decide(row, "error", reason=f"{type(exc).__name__}: {exc}"[:500])

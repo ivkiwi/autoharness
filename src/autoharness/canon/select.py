@@ -4,8 +4,11 @@ Only an instruction-only create, update or patch of a global canon skill qualifi
 the canon registry allows, and carrying no authority-class content. Anything else is decided
 `out_of_phase`: kept in the queue for a later phase, put in front of no one.
 """
+import difflib
 import json
 import re
+import tempfile
+from collections import Counter
 from pathlib import Path
 
 from autoharness import config
@@ -59,9 +62,16 @@ def _host_specific(text, repo):
     return bool(validate._ABS_PATH.search(text)) or bool(repo and repo in text)
 
 
-def _added(baseline, body):
-    old = set(baseline.splitlines())
-    return "\n".join(line for line in body.splitlines() if line not in old)
+def _changed(baseline, body):
+    """(added, removed) text by a line diff that sees order and repeats: a line moved from an
+    'only after approval' section into a routine one shows up on both sides."""
+    a, b = baseline.splitlines(), body.splitlines()
+    added, removed = [], []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op != "equal":
+            removed += a[i1:i2]
+            added += b[j1:j2]
+    return "\n".join(added), "\n".join(removed)
 
 
 def protected():
@@ -125,23 +135,45 @@ def classify(row):
     except (KeyError, ValueError) as exc:
         return "out_of_phase", f"delta:{exc}"
     baseline = "" if action == "create" else skill_store.read_body("global", name, config.CANON_ROOT) or ""
-    reason = check_change(intent, baseline, body, row.get("project_root"))
+    reason = check_change(intent, baseline, body, row.get("project_root"),
+                          base_dir=None if action == "create" else entry.resolve())
     return ("out_of_phase", reason) if reason else ("eligible", body)
 
 
-def check_change(intent, baseline, body, project_root=None):
+def _contexts(text, pattern):
+    """Each line matching pattern with the heading it sits under, as a multiset: a line that moves to
+    another section changes its context even when the line diff calls the heading the thing that moved."""
+    heading, out = "", Counter()
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            heading = line.strip()
+        elif pattern(line):
+            out[(heading, line.strip())] += 1
+    return out
+
+
+def _authority(line):
+    return any(p.search(line) for p in AUTHORITY)
+
+
+def check_change(intent, baseline, body, project_root=None, base_dir=None):
     """None, or why this change cannot go through phase 1: the promoter's full static validation of the
-    final body as a global skill, the guard, and the authority rules on what is added and removed."""
+    final body as a global skill against the tree it will ship with (base_dir; a create ships alone),
+    the guard, and the authority rules on what is added and removed."""
     repo = Path(project_root).name if project_root else None
-    verdict = validate.validate({**intent, "level": "global"}, body, target_is_agent_created=True, repo_name=repo)
-    added, removed = _added(baseline, body), _added(body, baseline)
+    with tempfile.TemporaryDirectory() as alone:
+        verdict = validate.validate({**intent, "level": "global"}, body, target_is_agent_created=True,
+                                    repo_name=repo, base_dir=Path(base_dir) if base_dir else Path(alone))
+    added, removed = _changed(baseline, body)
     findings = {f[0] for f in verdict["findings"]}
     # canon lives on this host: paths a skill already carries stay; only a change may not add new ones
     if "global_repo_agnostic" in findings and not _host_specific(added, repo):
         findings.discard("global_repo_agnostic")
     if findings:
         return "invalid:" + ",".join(sorted(findings))
+    restrictions_lost = _contexts(baseline, RESTRICTION.search) - _contexts(body, RESTRICTION.search)
     if skills_guard.scan(body) or any(p.search(added) or p.search(removed) for p in AUTHORITY) \
-            or RESTRICTION.search(removed):
+            or RESTRICTION.search(removed) or restrictions_lost \
+            or _contexts(baseline, _authority) != _contexts(body, _authority):
         return "authority"
     return None

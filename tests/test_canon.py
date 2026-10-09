@@ -392,3 +392,11 @@ def test_identical_lessons_staged_twice_are_two_events():
         queue.append("interactive", [{"action": "create", "name": "foo", "stage_id": stage}], [{"ok": True}],
                      provenance={"kind": "interactive", "session_id": "s", "transcript_path": "/t"})
     assert len(queue.read()) == 2
+
+
+def test_moving_a_line_out_of_an_approval_section_is_an_authority_change():
+    _skill(release.skills_dir(), "foo", BODY.format(name="foo")
+           + "## Only after approval\nPost the report to Slack.\n## Routine actions\nFormat the date.\n")
+    row = _row(action="patch", old_string="Post the report to Slack.\n## Routine actions\n",
+               new_string="## Routine actions\nPost the report to Slack.\n")
+    assert select.classify(row) == ("out_of_phase", "authority")

@@ -192,11 +192,11 @@ def test_out_of_phase_rows_are_filed_and_one_eligible_row_per_pass(canon_foo):
 def test_the_candidate_is_derived_from_the_frozen_snapshot(canon_foo, monkeypatch):
     real, calls = gate.select.check_change, []
 
-    def edit_meanwhile(intent, baseline, body, project_root=None):
+    def edit_meanwhile(intent, baseline, body, project_root=None, base_dir=None):
         calls.append(1)
         if len(calls) == 2:  # the second check is evaluate's, right after it froze the baseline
             (canon_foo / "SKILL.md").write_text(BASE + "Hand edit.\n")
-        return real(intent, baseline, body, project_root)
+        return real(intent, baseline, body, project_root, base_dir)
     monkeypatch.setattr(gate.select, "check_change", edit_meanwhile)
     _queue_patch()
     assert gate.run_once(Fake())["decision"] == "conflict"
@@ -249,13 +249,47 @@ def test_an_unreadable_protection_list_stops_the_pass_without_deciding(canon_foo
 def test_a_change_between_selection_and_evaluation_is_kept(canon_foo, monkeypatch):
     real, calls = gate.select.check_change, []
 
-    def edit_during_selection(intent, baseline, body, project_root=None):
+    def edit_during_selection(intent, baseline, body, project_root=None, base_dir=None):
         calls.append(1)
         if len(calls) == 1:  # classify's check, before evaluate freezes the baseline
             (canon_foo / "SKILL.md").write_text(BASE + "Hand edit.\n")
-        return real(intent, baseline, body, project_root)
+        return real(intent, baseline, body, project_root, base_dir)
     monkeypatch.setattr(gate.select, "check_change", edit_during_selection)
     _queue_patch()
     assert gate.run_once(Fake())["decision"] == "published"
     live = (release.skills_dir() / "foo" / "SKILL.md").read_text()
     assert "Hand edit." in live and "Prefer ISO 8601." in live  # derived from the snapshot it was checked on
+
+
+def test_a_notice_survives_a_torn_tail(canon_foo):
+    config.GATE_DIR.mkdir(parents=True, exist_ok=True)
+    (config.GATE_DIR / "notices.jsonl").write_text('{"id": "old", "te')  # crash mid-append earlier
+    _queue_patch()
+    gate.run_once(Fake())
+    ids = [json.loads(line)["id"] for line in (config.GATE_DIR / "notices.jsonl").read_text().splitlines()
+           if line.startswith('{"id"') and line.endswith("}")]
+    assert len(ids) == 1  # the new notice is its own readable line
+
+
+def test_a_failure_after_the_switch_is_finalized_as_published_not_error(canon_foo, monkeypatch):
+    monkeypatch.setattr(config, "GATE_MAX_ATTEMPTS", 1)
+    real, calls = gate._notify, []
+
+    def notify_fails_once(event_id, text):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        return real(event_id, text)
+    monkeypatch.setattr(gate, "_notify", notify_fails_once)
+    _queue_patch()
+    assert gate.run_once(Fake()) is None  # committed; finalization deferred, no attempt counted
+    gate.run_once(Fake(secret="never-in-a-prompt"))
+    assert [d["decision"] for d in _decisions()] == ["published"]
+    assert len((config.GATE_DIR / "notices.jsonl").read_text().splitlines()) == 1
+
+
+def test_a_dangling_reference_in_the_candidate_never_reaches_the_model(canon_foo):
+    _queue_patch(new="Use strftime.\nSee references/missing.md.\n")
+    fake = Fake()
+    gate.run_once(fake)
+    assert fake.calls == [] and _decisions()[0]["reason"].startswith("invalid:")
