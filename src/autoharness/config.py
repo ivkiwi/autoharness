@@ -126,3 +126,8 @@ GATE_DIR = Path(os.environ.get("AUTOHARNESS_GATE_DIR") or Path.home() / ".agents
 CANON_ROOT = Path(os.environ.get("AUTOHARNESS_CANON_ROOT") or Path.home() / ".agents")  # skills/, skill-releases/
 # other harnesses' skill roots: a new canon name must be free in every place a harness discovers skills
 HOST_SKILL_ROOTS = [Path.home() / ".claude" / "skills", Path.home() / ".codex" / "skills"]
+GATE_PLANNER_MODEL = os.environ.get("AUTOHARNESS_GATE_PLANNER_MODEL", "opus")  # freezes the cases, never sees the candidate
+GATE_REPLAY_MODEL = os.environ.get("AUTOHARNESS_GATE_REPLAY_MODEL", "sonnet")  # answers them with each version
+GATE_DAILY_CALLS = _int_env("AUTOHARNESS_GATE_DAILY_CALLS", 6)  # one candidate costs three calls
+GATE_CALL_TIMEOUT_S = _int_env("AUTOHARNESS_GATE_CALL_TIMEOUT_S", 600)
+GATE_MAX_ATTEMPTS = _int_env("AUTOHARNESS_GATE_MAX_ATTEMPTS", 3)
