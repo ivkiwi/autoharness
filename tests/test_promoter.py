@@ -555,20 +555,25 @@ def test_drain_accounts_an_oserror_that_belongs_to_the_intent(tmp_path, monkeypa
     assert intent_queue.read("r1", proot) == []
 
 
-def test_drain_keeps_the_queue_when_windows_reports_a_locked_file(tmp_path, monkeypatch):
-    # a sharing violation (another process has the file open) arrives as EACCES: transient, retry it
+@pytest.mark.parametrize("winerror, kept", [(32, True), (33, True), (19, True), (23, True), (29, True),
+                                             (30, True), (108, True), (5, False), (65, False)])
+def test_windows_eacces_is_split_by_its_native_code(tmp_path, monkeypatch, winerror, kept):
+    # Windows folds sharing/lock and device/media failures into EACCES; only a real denial is final
     roots = _roots(tmp_path)
     proot = roots["project"]
     intent_queue.append("r1", _create(), proot)
 
-    def locked(*a, **k):
-        exc = PermissionError(errno.EACCES, "The process cannot access the file")
-        exc.winerror = 32
+    def fail(*a, **k):
+        exc = PermissionError(errno.EACCES, "Windows error")
+        exc.winerror = winerror
         raise exc
-    monkeypatch.setattr(promoter, "promote", locked)
-    with pytest.raises(PermissionError):
-        promoter.drain("r1", roots=roots)
-    assert intent_queue.read("r1", proot)  # kept for the next drain
+    monkeypatch.setattr(promoter, "promote", fail)
+    if kept:
+        with pytest.raises(PermissionError):
+            promoter.drain("r1", roots=roots)
+    else:
+        assert promoter.drain("r1", roots=roots)[0]["findings"][0][0] == "crash"
+    assert bool(intent_queue.read("r1", proot)) is kept
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="NAME_MAX semantics are POSIX")

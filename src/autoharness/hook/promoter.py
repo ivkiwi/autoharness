@@ -247,8 +247,9 @@ def _account(run_id, intents, verdicts, proot):
 # this intent and would fail again on every Stop, wedging everything queued behind it.
 _ENVIRONMENTAL_ERRNOS = {getattr(errno, n) for n in ("ENOSPC", "EDQUOT", "EIO", "EROFS", "EAGAIN", "EINTR",
                                                       "EBUSY", "ENFILE", "EMFILE") if hasattr(errno, n)}
-# Windows reports another process holding the file (sharing / lock violation) as EACCES: transient too
-_ENVIRONMENTAL_WINERRORS = {32, 33}
+# Windows folds device, media, sharing and lock failures into EACCES (CPython PC/errmap.h); those are
+# transient too. A plain access denial (5, 65) and the rest stay with the intent.
+_ENVIRONMENTAL_WINERRORS = {*range(19, 37), 83, 108, 132, 167}
 
 
 def _environmental(exc):
