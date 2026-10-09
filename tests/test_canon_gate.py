@@ -1,4 +1,4 @@
-"""The canon gate pass with a fake model: frozen cases, replay, deterministic decision, publish."""
+"""The canon gate pass with a fake model: frozen cases with action menus, replay, decision, publish."""
 import json
 
 import pytest
@@ -8,30 +8,28 @@ from autoharness.canon import gate, queue, release
 
 BASE = "---\nname: foo\ndescription: Use when formatting a date.\n---\nUse strftime.\n"
 CAND = BASE + "Prefer ISO 8601.\n"
-CASES = [
-    {"id": "v1", "kind": "visible", "task": "format a log date",
-     "expect": {"apply_skill": True, "required_actions": ["iso 8601"], "forbidden_actions": [],
-                "must_contain": [], "must_not_contain": []}},
-    {"id": "v2", "kind": "visible", "task": "format a report date",
-     "expect": {"apply_skill": True, "required_actions": ["iso 8601"], "forbidden_actions": [],
-                "must_contain": [], "must_not_contain": []}},
-    {"id": "h1", "kind": "holdout", "task": "format an api date",
-     "expect": {"apply_skill": True, "required_actions": ["iso 8601"], "forbidden_actions": [],
-                "must_contain": [], "must_not_contain": []}},
-    {"id": "a1", "kind": "adjacent", "task": "parse a date",
-     "expect": {"apply_skill": True, "required_actions": ["strftime"], "forbidden_actions": [],
-                "must_contain": [], "must_not_contain": []}},
-    {"id": "n1", "kind": "negative", "task": "rename a branch",
-     "expect": {"apply_skill": False, "required_actions": [], "forbidden_actions": ["strftime"],
-                "must_contain": [], "must_not_contain": []}},
-]
+MENU = [{"id": "A1", "does": "format with strftime and ISO 8601"},
+        {"id": "A2", "does": "format with the locale default"},
+        {"id": "A3", "does": "rename the git branch"}]
+
+
+def _case(cid, kind, apply_skill, required=(), forbidden=()):
+    return {"id": cid, "kind": kind, "task": f"task {cid}", "actions": MENU,
+            "expect": {"apply_skill": apply_skill, "required": list(required), "forbidden": list(forbidden)}}
+
+
+CASES = [_case("v1", "visible", True, ["A1"], ["A2"]), _case("v2", "visible", True, ["A1"]),
+         _case("h1", "holdout", True, ["A1"]), _case("a1", "adjacent", True, ["A1"]),
+         _case("n1", "negative", False, ["A3"], ["A1"])]
 
 
 def honest(skill, task):
     """An agent that follows whatever the skill says, and only for date tasks."""
-    dated = task["id"] != "n1" and bool(skill)
-    actions = (["use strftime"] + (["format as ISO 8601"] if "ISO 8601" in skill else [])) if dated else ["git branch -m"]
-    return {"id": task["id"], "apply_skill": dated, "actions": actions, "answer": "done"}
+    if task["id"] == "n1" or not skill:
+        return {"id": task["id"], "apply_skill": False, "chosen": ["A3"] if task["id"] == "n1" else ["A2"],
+                "answer": "done"}
+    return {"id": task["id"], "apply_skill": True, "chosen": ["A1"] if "ISO 8601" in skill else ["A2"],
+            "answer": "done"}
 
 
 class Fake:
@@ -58,10 +56,10 @@ def canon_foo():
     return d
 
 
-def _queue_patch(new=CAND, name="foo", **verdict):
-    intent = {"action": "patch", "name": name, "level": "global", "old_string": BASE.split("---\n")[-1],
-              "new_string": new.split("---\n")[-1], "reason": "dates kept coming out ambiguous", "evidence": "e"}
-    queue.append("r1", [intent], [verdict or {"ok": False, "findings": [["self_produced", "x"]]}],
+def _queue_patch(old="Use strftime.\n", new="Use strftime.\nPrefer ISO 8601.\n", run="r1", **verdict):
+    intent = {"action": "patch", "name": "foo", "level": "global", "old_string": old, "new_string": new,
+              "reason": "dates kept coming out ambiguous", "evidence": "e", "stage_id": run}
+    queue.append(run, [intent], [verdict or {"ok": False, "findings": [["self_produced", "x"]]}],
                  provenance={"session_id": "s", "range": [0, 1]})
 
 
@@ -85,41 +83,82 @@ def test_a_candidate_that_gains_and_breaks_nothing_is_published(canon_foo):
 
 def test_a_baseline_that_already_does_it_is_no_action(canon_foo):
     (canon_foo / "SKILL.md").write_text(CAND)  # the live skill already prefers ISO 8601
-    intent = {"action": "patch", "name": "foo", "level": "global", "old_string": "Prefer ISO 8601.\n",
-              "new_string": "Prefer ISO 8601. Dates matter.\n", "reason": "r", "evidence": "e"}
-    queue.append("r1", [intent], [{"ok": False, "findings": [["self_produced", "x"]]}])
-    assert gate.run_once(Fake(secret="Dates matter"))["decision"] == "no_action"
+    _queue_patch(old="Prefer ISO 8601.\n", new="Prefer ISO 8601 for dates.\n")
+    assert gate.run_once(Fake(secret="for dates"))["decision"] == "no_action"
     assert not (release.skills_dir() / "foo").is_symlink()
 
 
-def test_a_failed_assertion_rejects(canon_foo):
+def test_a_failed_expectation_rejects(canon_foo):
     def overreach(skill, task):  # the candidate also fires on the negative task
         a = honest(skill, task)
         if "ISO 8601" in skill and task["id"] == "n1":
-            a.update(apply_skill=True, actions=["use strftime"])
+            a.update(apply_skill=True, chosen=["A1"])
         return a
     _queue_patch()
     assert gate.run_once(Fake(overreach))["decision"] == "rejected"
 
 
 def test_the_safety_invariant_rejects_whatever_the_cases_say(canon_foo):
-    def wipe(skill, task):
+    wipe = [*MENU[:2], {"id": "A3", "does": "git reset --hard to start clean"}]
+    cases = [{**c, "actions": wipe} for c in CASES]
+
+    def careless(skill, task):
         a = honest(skill, task)
-        if "ISO 8601" in skill:
-            a["actions"] = a["actions"] + ["git reset --hard"]
+        if "ISO 8601" in skill and task["id"] == "v1":
+            a["chosen"] = ["A1", "A3"]
         return a
     _queue_patch()
-    assert gate.run_once(Fake(wipe))["decision"] == "rejected"
+    assert gate.run_once(Fake(careless, cases))["decision"] == "rejected"
 
 
-def test_a_malformed_plan_is_not_cached_and_gives_up_after_the_attempt_cap(canon_foo, monkeypatch):
+@pytest.mark.parametrize("broken", [
+    CASES[:4],  # no negative case
+    [*CASES[:4], _case("n1", "negative", False)],  # a negative case with nothing to check
+    [_case("v1", "visible", True, ["A9"]), *CASES[1:]],  # an expectation outside the menu
+])
+def test_a_malformed_plan_is_not_cached_and_gives_up_after_the_attempt_cap(canon_foo, monkeypatch, broken):
     monkeypatch.setattr(config, "GATE_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(config, "GATE_DAILY_CALLS", 10)
     _queue_patch()
-    bad = Fake(cases=CASES[:4])  # no negative case
+    bad = Fake(cases=broken)
     assert gate.run_once(bad) is None and _decisions() == []
     assert not (config.GATE_DIR / "cache").exists()
     assert gate.run_once(bad)["decision"] == "error"
     assert len(bad.calls) == 2  # asked again, never served from cache
+
+
+def test_a_reply_missing_a_field_is_not_cached(canon_foo, monkeypatch):
+    monkeypatch.setattr(config, "GATE_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(config, "GATE_DAILY_CALLS", 10)
+    _queue_patch()
+
+    def no_chosen(skill, task):
+        a = honest(skill, task)
+        del a["chosen"]
+        return a
+    assert gate.run_once(Fake(no_chosen)) is None
+    assert gate.run_once(Fake(no_chosen))["decision"] == "error"
+
+
+def test_a_cached_reply_that_breaks_the_contract_is_asked_again(canon_foo, monkeypatch):
+    monkeypatch.setattr(config, "GATE_DAILY_CALLS", 10)
+    _queue_patch()
+    gate.run_once(Fake(answer=lambda s, t: {**honest(s, t), "chosen": ["A9"]}))  # replies rejected, plan cached
+    for f in (config.GATE_DIR / "cache").glob("*.json"):
+        f.write_text('{"cases": "garbage"}')
+    fresh = Fake()
+    assert gate.run_once(fresh)["decision"] == "published"
+    assert fresh.calls[0] == config.GATE_PLANNER_MODEL  # the corrupt plan was dropped and asked again
+
+
+def test_opposite_behaviour_cannot_satisfy_an_expectation(canon_foo):
+    def says_the_words_does_the_opposite(skill, task):
+        a = honest(skill, task)
+        if "ISO 8601" in skill and task["id"] == "v2":  # v2 forbids nothing: only the required id can catch it
+            a.update(chosen=["A2"], answer="do not format as ISO 8601")
+        return a
+    _queue_patch()
+    assert gate.run_once(Fake(says_the_words_does_the_opposite))["decision"] == "rejected"
 
 
 def test_budget_stops_the_pass_and_the_next_one_resumes_from_cache(canon_foo, monkeypatch):
@@ -133,15 +172,62 @@ def test_budget_stops_the_pass_and_the_next_one_resumes_from_cache(canon_foo, mo
     assert second.calls == [config.GATE_REPLAY_MODEL, config.GATE_REPLAY_MODEL]  # the plan came from cache
 
 
+def test_one_candidate_a_day(canon_foo, monkeypatch):
+    monkeypatch.setattr(config, "GATE_DAILY_CALLS", 10)
+    _queue_patch(run="r1")
+    queue.append("r2", [{"action": "create", "name": "bar", "level": "global",
+                         "body": BASE.replace("foo", "bar"), "reason": "r", "evidence": "e"}], [{"ok": True}])
+    assert gate.run_once(Fake())["decision"] == "published"
+    fake = Fake(secret="never-in-a-prompt")
+    assert gate.run_once(fake) is None and fake.calls == []  # tomorrow
+
+
 def test_out_of_phase_rows_are_filed_and_one_eligible_row_per_pass(canon_foo):
     queue.append("r0", [{"action": "delete", "name": "foo", "level": "global"}], [{"ok": True}])
     _queue_patch()
-    queue.append("r2", [{"action": "create", "name": "bar", "level": "global", "body": BASE.replace("foo", "bar"),
-                         "reason": "r", "evidence": "e"}], [{"ok": True}])
+    gate.run_once(Fake())
+    assert [d["decision"] for d in _decisions()] == ["out_of_phase", "published"]
+
+
+def test_the_candidate_is_derived_from_the_frozen_snapshot(canon_foo, monkeypatch):
+    real, calls = gate.select.check_change, []
+
+    def edit_meanwhile(intent, baseline, body, project_root=None):
+        calls.append(1)
+        if len(calls) == 2:  # the second check is evaluate's, right after it froze the baseline
+            (canon_foo / "SKILL.md").write_text(BASE + "Hand edit.\n")
+        return real(intent, baseline, body, project_root)
+    monkeypatch.setattr(gate.select, "check_change", edit_meanwhile)
+    _queue_patch()
+    assert gate.run_once(Fake())["decision"] == "conflict"
+    assert (canon_foo / "SKILL.md").read_text() == BASE + "Hand edit.\n"  # the hand edit was not overwritten
+
+
+def test_a_body_that_fails_static_validation_never_reaches_the_model(canon_foo):
+    queue.append("r1", [{"action": "create", "name": "bar", "level": "global", "body": "no frontmatter\n",
+                         "reason": "r", "evidence": "e"}],
+                 [{"ok": False, "findings": [["routing", "global layer is disabled by AUTOHARNESS_DISABLE_GLOBAL"]]}])
     fake = Fake()
     gate.run_once(fake)
-    assert [d["decision"] for d in _decisions()] == ["out_of_phase", "published"]
-    assert len(fake.calls) == 3  # the create waits for the next pass
+    assert fake.calls == [] and _decisions()[0]["reason"].startswith("invalid:")
+
+
+def test_a_publish_that_committed_before_its_decision_is_reconciled(canon_foo, monkeypatch):
+    _queue_patch()
+    real = gate._decide
+
+    def crash_on_publish(row, decision, **extra):
+        if decision == "published":
+            raise KeyboardInterrupt
+        return real(row, decision, **extra)
+    with monkeypatch.context() as m:
+        m.setattr(gate, "_decide", crash_on_publish)
+        with pytest.raises(KeyboardInterrupt):
+            gate.run_once(Fake())
+    assert gate.run_once(Fake(secret="never-in-a-prompt")) is None
+    [d] = _decisions()
+    assert d["decision"] == "published" and d["recovered"]
+    assert len((config.GATE_DIR / "notices.jsonl").read_text().splitlines()) == 1
 
 
 def test_a_baseline_that_moved_is_a_conflict(canon_foo, monkeypatch):
@@ -158,3 +244,18 @@ def test_an_unreadable_protection_list_stops_the_pass_without_deciding(canon_foo
     fake = Fake()
     assert gate.run_once(fake) is None
     assert _decisions() == [] and fake.calls == []
+
+
+def test_a_change_between_selection_and_evaluation_is_kept(canon_foo, monkeypatch):
+    real, calls = gate.select.check_change, []
+
+    def edit_during_selection(intent, baseline, body, project_root=None):
+        calls.append(1)
+        if len(calls) == 1:  # classify's check, before evaluate freezes the baseline
+            (canon_foo / "SKILL.md").write_text(BASE + "Hand edit.\n")
+        return real(intent, baseline, body, project_root)
+    monkeypatch.setattr(gate.select, "check_change", edit_during_selection)
+    _queue_patch()
+    assert gate.run_once(Fake())["decision"] == "published"
+    live = (release.skills_dir() / "foo" / "SKILL.md").read_text()
+    assert "Hand edit." in live and "Prefer ISO 8601." in live  # derived from the snapshot it was checked on

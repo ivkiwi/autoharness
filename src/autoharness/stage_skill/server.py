@@ -20,6 +20,7 @@ ponytail: the MCP stdio process shell (serve) + .mcp.json registration is deferr
 import json
 import os
 import sys
+import uuid
 
 from autoharness import config
 from autoharness.lib import intent_queue, layer, validate
@@ -176,7 +177,9 @@ def stage(params, *, run_id, root=None):
         errors += _content_errors(params)
     if errors:
         return {"ok": False, "errors": errors, "intent": None}
-    intent = _intent(params)
+    # one id per staging, kept by every retry of the same queue line: two identical lessons from two
+    # turns stay two events for the shared gate, a crash replay of one stays one
+    intent = {**_intent(params), "stage_id": uuid.uuid4().hex}
     try:
         intent_queue.append(run_id, intent, root)
     except ValueError as exc:

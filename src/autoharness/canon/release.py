@@ -193,12 +193,15 @@ def _untouched(tx):
 
 def _restore(tx):
     entry = skills_dir() / tx["name"]
-    if tx["to"] is not None and entry.is_symlink() and os.readlink(entry) == tx["to"]["target"]:
+    ours = tx["to"] is not None and entry.is_symlink() and os.readlink(entry) == tx["to"]["target"]
+    if tx["prev"]["kind"] == "link" and not tx.get("displaced"):
+        if ours or not os.path.lexists(entry):
+            _point(tx["name"], tx["prev"]["target"])  # replace in one step: never a moment without it
+        return
+    if ours:
         entry.unlink()  # our own new link; the release it points at stays
     if not os.path.lexists(entry) and tx.get("displaced") and os.path.lexists(tx["displaced"]):
         os.rename(tx["displaced"], entry)  # the previous entry goes back exactly as it was
-    elif not os.path.lexists(entry) and tx["prev"]["kind"] == "link":
-        _point(tx["name"], tx["prev"]["target"])
 
 
 def _recover_locked():

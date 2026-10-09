@@ -131,3 +131,4 @@ GATE_REPLAY_MODEL = os.environ.get("AUTOHARNESS_GATE_REPLAY_MODEL", "sonnet")  #
 GATE_DAILY_CALLS = _int_env("AUTOHARNESS_GATE_DAILY_CALLS", 6)  # one candidate costs three calls
 GATE_CALL_TIMEOUT_S = _int_env("AUTOHARNESS_GATE_CALL_TIMEOUT_S", 600)
 GATE_MAX_ATTEMPTS = _int_env("AUTOHARNESS_GATE_MAX_ATTEMPTS", 3)
+GATE_DAILY_CANDIDATES = _int_env("AUTOHARNESS_GATE_DAILY_CANDIDATES", 1)  # consensus: at most one new candidate a day

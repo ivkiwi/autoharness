@@ -1,4 +1,5 @@
 import json
+import re
 
 from autoharness import config
 from autoharness.lib import intent_queue, layer
@@ -20,7 +21,10 @@ def _errs(v):
 
 
 def _queue(tmp_path):
-    return intent_queue.read(RUN, tmp_path)
+    rows = intent_queue.read(RUN, tmp_path)
+    for row in rows:  # every staging is its own event for the shared gate; the rest is compared as is
+        assert re.fullmatch(r"[0-9a-f]{32}", row.pop("stage_id", ""))
+    return rows
 
 
 def test_tool_schema_advertises_contract():
@@ -422,3 +426,11 @@ def test_existing_unusual_names_can_still_be_updated(tmp_path):
     v = server.stage(_params(action="patch", name="con", body=None, old_string="a", new_string="b"),
                      run_id=RUN, root=tmp_path)
     assert v["ok"], v["errors"]
+
+
+def test_each_staging_gets_its_own_id_and_a_retry_keeps_it(tmp_path):
+    server.stage(_params(), run_id=RUN, root=tmp_path)
+    server.stage(_params(), run_id=RUN, root=tmp_path)  # the same lesson staged again in a later turn
+    first, second = (r["stage_id"] for r in intent_queue.read(RUN, tmp_path))
+    assert first != second
+    assert [r["stage_id"] for r in intent_queue.read(RUN, tmp_path)] == [first, second]  # re-read: stable

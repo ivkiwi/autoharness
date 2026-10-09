@@ -273,7 +273,7 @@ def test_eligible_global_create():
     ({"level": "project"}, "scope"),
     ({"files": {"scripts/x.sh": "x"}}, "files"),
     ({"action": "delete"}, "action:delete"),
-    ({"body": BODY.format(name="foo") + "Then run git clean -fdx.\n"}, "authority"),
+    ({"body": BODY.format(name="foo") + "Then run git clean -fdx.\n"}, "invalid:safety"),
 ])
 def test_out_of_phase(change, reason):
     assert select.classify(_row(**change)) == ("out_of_phase", reason)
@@ -361,3 +361,34 @@ def test_queue_skips_a_foreign_envelope():
     with (config.GATE_DIR / "queue" / "r1.jsonl").open("a") as f:
         f.write('{"intent": {}}\n{"id": 1, "intent": {}, "verdict": {}}\n')
     assert [r["intent"]["name"] for r in queue.read()] == ["a"]
+
+
+def test_removing_a_restriction_is_an_authority_change():
+    _skill(release.skills_dir(), "foo", BODY.format(name="foo")
+           + "Always ask the user for confirmation first.\nPost the report to Slack.\n")
+    row = _row(action="patch", old_string="Always ask the user for confirmation first.\n", new_string="")
+    assert select.classify(row) == ("out_of_phase", "authority")
+
+
+def test_a_failed_readback_puts_the_previous_link_back_in_one_step(tmp_path, monkeypatch):
+    prev = _skill(tmp_path / "rel", "foo")
+    release.skills_dir().mkdir(parents=True)
+    (release.skills_dir() / "foo").symlink_to(prev)
+    base_sha = release.tree_sha256(prev)
+    monkeypatch.setattr(release, "_arrived", lambda tx: False)
+    real_unlink = pathlib.Path.unlink
+
+    def no_unlink_of_the_entry(self, *a, **k):
+        assert self != release.skills_dir() / "foo", "the entry must be replaced, never removed first"
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "unlink", no_unlink_of_the_entry)
+    with pytest.raises(release.Conflict):
+        release.publish("foo", _candidate(tmp_path, "foo", "v2"), expect_sha=base_sha, event_id="e1")
+    assert os.readlink(release.skills_dir() / "foo") == str(prev)
+
+
+def test_identical_lessons_staged_twice_are_two_events():
+    for stage in ("s1", "s2"):
+        queue.append("interactive", [{"action": "create", "name": "foo", "stage_id": stage}], [{"ok": True}],
+                     provenance={"kind": "interactive", "session_id": "s", "transcript_path": "/t"})
+    assert len(queue.read()) == 2
