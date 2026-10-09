@@ -158,3 +158,15 @@ def test_sweep_orphans_survives_an_unreadable_archive(tmp_path):
         assert skill_store.sweep_orphans("project", tmp_path) == [gone]
     finally:
         archive.chmod(0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, non-root")
+def test_sweep_orphans_survives_an_unreadable_skills_dir(tmp_path):
+    # one locked-down layer must not stop the drain for the other
+    skills = layer.skills_dir("global", tmp_path)
+    skills.mkdir(parents=True)
+    skills.chmod(0)
+    try:
+        assert skill_store.sweep_orphans("global", tmp_path) == []
+    finally:
+        skills.chmod(0o755)

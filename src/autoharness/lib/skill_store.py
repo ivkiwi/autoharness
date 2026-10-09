@@ -126,8 +126,11 @@ def sweep_orphans(lyr, root=None):
     removed = []
     cutoff = time.time() - ORPHAN_TMP_MIN_AGE_S
     archive = layer.archive_dir(lyr, root)
-    linked = archive.is_symlink()  # a linked .archive leads outside the layer: never walk it
-    dirs = [*_listing(skills), *(_listing(archive) if archive.is_dir() and not linked else [])]
+    try:  # a linked .archive leads outside the layer: never walk it; an unreadable layer has none to walk
+        walk_archive = archive.is_dir() and not archive.is_symlink()
+    except OSError:
+        walk_archive = False
+    dirs = [*_listing(skills), *(_listing(archive) if walk_archive else [])]
     for tmp in (t for d in dirs if _ours(d) for t in d.rglob("*.tmp")):
         try:
             if tmp.stat().st_mtime > cutoff:
