@@ -194,6 +194,43 @@ def test_tail_survives_a_failed_launch_and_clears_after_a_confirmed_reflection(c
     assert counters.session_offset(SID, repo / ".codex") == transcript.stat().st_size
 
 
+def test_failed_child_consumes_nothing(codex, repo, tmp_path):
+    transcript = Path(_rollout(tmp_path / "rollout.jsonl"))
+    for i in range(config.REFLECT_EVERY_N):
+        _tool(repo, str(transcript), i)
+    _stop(repo, str(transcript))
+    refused = lambda argv, env, payload: SimpleNamespace(returncode=2, stderr="MCP tool call requires approval")  # noqa: E731
+
+    _confirm_reflection(transcript, repo, tmp_path, child=refused)  # returns, the crash is in the run account
+    assert counters.session_offset(SID, repo / ".codex") == 0  # the window is still unconsumed
+    assert tails.pending(repo / ".codex")[0]["count"] == config.REFLECT_EVERY_N
+    assert "spawn_error" in json.loads((_state(repo) / "runs" / "run-1.json").read_text(encoding="utf-8"))
+
+    _confirm_reflection(transcript, repo, tmp_path)
+    assert counters.session_offset(SID, repo / ".codex") == transcript.stat().st_size
+    assert tails.pending(repo / ".codex") == []
+
+
+def test_reflection_settles_only_the_note_it_was_launched_from(codex, repo, tmp_path):
+    transcript = Path(_rollout(tmp_path / "rollout.jsonl"))
+    for i in range(config.REFLECT_EVERY_N):
+        _tool(repo, str(transcript), i)
+    _stop(repo, str(transcript))  # note A, the one the reflection answers for
+
+    def child_during_which_a_stop_happens(argv, env, payload):
+        transcript.write_text(transcript.read_text(encoding="utf-8") + '{"type": "event_msg"}\n', encoding="utf-8")
+        _tool(repo, str(transcript), 99)
+        _stop(repo, str(transcript))  # note B: newer activity, written while the child runs
+        return SimpleNamespace(returncode=0, stderr="")
+
+    size_before = transcript.stat().st_size
+    _confirm_reflection(transcript, repo, tmp_path, child=child_during_which_a_stop_happens)
+    [note] = tails.pending(repo / ".codex")  # B survives A's completion
+    assert note["count"] == 1
+    assert note["offset"] == size_before == counters.session_offset(SID, repo / ".codex")  # B starts where A stopped
+    assert note["transcript_path"] == str(transcript)
+
+
 def test_session_end_with_nothing_new_keeps_an_earlier_gap_note(codex, repo):
     for i in range(config.REFLECT_EVERY_N):
         _tool(repo, None, i)

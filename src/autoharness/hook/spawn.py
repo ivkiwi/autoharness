@@ -363,16 +363,30 @@ def main(argv=None):
         return run_curator(run_id, roots={layer.PROJECT: Path(proot), layer.GLOBAL: Path(groot)})
     transcript_path, session_id, run_id, proot, groot = argv
     roots = {layer.PROJECT: Path(proot), layer.GLOBAL: Path(groot)}
+    # the note this reflection answers for; a Stop during the child may write a newer one
+    launched_from = (tails.read(session_id, roots[layer.PROJECT]) or {}).get("version") if layer.HARNESS == "codex" else None
     offset = counters.session_offset(session_id, roots[layer.PROJECT])
     window_text, new_offset = capture.window(transcript_path, offset)
     provenance = {"kind": "reflector", "session_id": session_id, "transcript_path": transcript_path,
                   "range": [offset, new_offset],
                   "window_sha256": hashlib.sha256(window_text.encode("utf-8")).hexdigest()}
+    outcome = {}
+
+    def spawn_and_remember(argv_, env, payload):
+        # run() keeps a crashed child in the run account instead of raising (intents staged before the
+        # crash still drain), so the exit status is remembered here to decide whether the window was fed
+        proc = _detached_spawn(argv_, env, payload)
+        outcome["returncode"] = getattr(proc, "returncode", 0)
+        return proc
+
     result = run(window_text, run_id, roots=roots, session_id=session_id,
-                 digest=capture.digest(transcript_path, offset), provenance=provenance)
+                 digest=capture.digest(transcript_path, offset), provenance=provenance,
+                 spawn_fn=spawn_and_remember)
+    if outcome.get("returncode", 0) != 0:
+        return result  # not consumed (a refusal before the model counts): the watermark and the note stay
     counters.write_session_offset(session_id, new_offset, roots[layer.PROJECT])
     if layer.HARNESS == "codex":
-        tails.clear(session_id, roots[layer.PROJECT])  # confirmed: the window was fed and the watermark moved
+        tails.settle(session_id, launched_from, new_offset, roots[layer.PROJECT])
     return result
 
 
