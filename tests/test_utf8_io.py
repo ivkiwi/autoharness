@@ -26,7 +26,8 @@ def _locale_text_io(tree):
                 yield node.lineno, name
         elif name == "open" and not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name)
                                      and fn.value.id in ("tarfile", "gzip", "zipfile", "os")):
-            mode = node.args[1] if len(node.args) > 1 else _kw(node, "mode")
+            pos = 0 if isinstance(fn, ast.Attribute) else 1  # Path.open(mode) vs open(file, mode)
+            mode = node.args[pos] if len(node.args) > pos else _kw(node, "mode")
             text = not (isinstance(mode, ast.Constant) and "b" in str(mode.value))
             if text and _kw(node, "encoding") is None:
                 yield node.lineno, "open"
@@ -76,3 +77,8 @@ def test_mcp_pipes_carry_utf8_on_a_cp1252_host(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "stdout", _cp1252_pipe())
     server.serve()
     assert intent_queue.read("interactive", tmp_path)[0]["body"] == body
+
+
+def test_the_guard_reads_binary_modes_in_both_open_forms():
+    tree = ast.parse("open(p, 'rb')\np.open('rb')\np.open(mode='rb')\nopen(p)\np.open('a')\n")
+    assert [line for line, _ in _locale_text_io(tree)] == [4, 5]
