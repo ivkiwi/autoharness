@@ -26,6 +26,7 @@ validating admission (validate in-flight, persist only on allow) + POSIX atomic-
 
 ponytail: one drain per project root is now serialized through lib.lock (see drain). LED watermark still pends true values from CAP; the create anchor reads the layer request counter at land time (probation is fiction without a true anchor). Whole-run clear, the tiny crash window (between land and clear) may re-append the LED — per-item idempotent watermark pending the intent-queue granularity being finalized (validate-store open).
 """
+import errno
 import hashlib
 import json
 import re
@@ -241,14 +242,22 @@ def _account(run_id, intents, verdicts, proot):
     return record
 
 
+# the environment, not the intent: disk, quota, I/O, a read-only mount, transient pressure. Keep the
+# queue and retry. Any other OSError (permissions, a name too long, not a directory, ...) belongs to
+# this intent and would fail again on every Stop, wedging everything queued behind it.
+_ENVIRONMENTAL_ERRNOS = {getattr(errno, n) for n in ("ENOSPC", "EDQUOT", "EIO", "EROFS", "EAGAIN", "EINTR",
+                                                      "EBUSY", "ENFILE", "EMFILE") if hasattr(errno, n)}
+
+
 def _promote_one(intent, roots, repo_name):
     if intent_queue.UNREADABLE in intent:
         return _reject(None, None, [("queue", f"unreadable queue line: {intent[intent_queue.UNREADABLE]!r}")])
     try:
         return promote(intent, roots=roots, repo_name=repo_name)
-    except OSError:
-        raise  # environmental (disk, permissions): keep the queue so the next drain retries it
-    except Exception as exc:  # a malformed intent: account it once instead of replaying it on every Stop
+    except Exception as exc:
+        if isinstance(exc, OSError) and exc.errno in _ENVIRONMENTAL_ERRNOS:
+            raise  # keep the queue so the next drain retries it
+        # a malformed or unlandable intent: account it once instead of replaying it on every Stop
         return _reject(intent.get("action"), None, [("crash", f"{type(exc).__name__}: {exc}")])
 
 

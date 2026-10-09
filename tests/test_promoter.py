@@ -1,4 +1,6 @@
+import errno
 import json
+import sys
 import threading
 
 import pytest
@@ -536,6 +538,34 @@ def test_drain_crash_verdict_for_an_intent_that_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(promoter, "promote", lambda *a, **k: (_ for _ in ()).throw(TypeError("bad delta")))
     verdicts = promoter.drain("r1", roots=roots)
     assert verdicts[0]["findings"] == [("crash", "TypeError: bad delta")]
+    assert intent_queue.read("r1", proot) == []
+
+
+def test_drain_accounts_an_oserror_that_belongs_to_the_intent(tmp_path, monkeypatch):
+    # a read-only skill dir, a name the filesystem refuses: it would fail on every Stop, so account it
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("r1", _create(), proot)
+
+    def denied(*a, **k):
+        raise PermissionError(errno.EACCES, "Permission denied", "references")
+    monkeypatch.setattr(promoter, "promote", denied)
+    verdicts = promoter.drain("r1", roots=roots)
+    assert verdicts[0]["findings"][0][0] == "crash" and "PermissionError" in verdicts[0]["findings"][0][1]
+    assert intent_queue.read("r1", proot) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="NAME_MAX semantics are POSIX")
+def test_drain_does_not_wedge_on_a_name_the_filesystem_refuses(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    long_name = "a" * 256  # passes the name regex, exceeds NAME_MAX
+    intent_queue.append("r1", _create(), proot)
+    intent_queue.append("r1", _create(name=long_name, body=GOOD_BODY.replace("name: foo", f"name: {long_name}")), proot)
+    intent_queue.append("r1", _create(name="bar", body=GOOD_BODY.replace("name: foo", "name: bar")), proot)
+    verdicts = promoter.drain("r1", roots=roots)
+    assert [v["ok"] for v in verdicts] == [True, False, True]
+    assert skill_store.exists("project", "bar", proot)
     assert intent_queue.read("r1", proot) == []
 
 

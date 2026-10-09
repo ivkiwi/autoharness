@@ -38,4 +38,14 @@ def read(lyr, name, root=None, *, archived=False):
     p = (layer.archive_dir(lyr, root) / name / FILENAME) if archived else path(lyr, name, root)
     if not p.exists():
         return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    out = []
+    # "\n" only: json.dumps writes U+2028 and friends raw inside `reason`, and splitlines() would cut
+    # an entry in two; a line torn by a crash mid-append is skipped, the rest of the provenance reads
+    for line in p.read_text(encoding="utf-8", errors="replace").split("\n"):
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
