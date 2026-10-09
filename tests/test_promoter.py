@@ -523,3 +523,12 @@ def test_create_in_the_same_layer_is_not_blocked_by_the_other_layer_check(tmp_pa
     roots = _roots(tmp_path)
     assert promoter.promote(_create(level="project"), roots=roots)["ok"]
     assert promoter.promote(_create(level="project"), roots=roots)["ok"]  # crash replay stays idempotent
+
+
+def test_create_checks_the_other_layer_even_with_global_disabled(tmp_path, monkeypatch):
+    # disabling global stops writes there; flipping it back must not reveal an ambiguous name
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    monkeypatch.setattr(promoter.config, "DISABLE_GLOBAL", True)
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)
