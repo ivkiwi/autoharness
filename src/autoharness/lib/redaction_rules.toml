@@ -8,7 +8,12 @@ pattern = '''AKIA[0-9A-Z]{16}'''
 
 [[secret]]
 name = "private_key_block"
-pattern = '''-----BEGIN [A-Z ]*PRIVATE KEY-----'''
+# the whole block, not just its header: through its END when that comes before another BEGIN or the
+# next transcript record (a line starting `{`), within 8 KiB; otherwise (a record clipped mid-key)
+# the rest of the header's line, which in a transcript record holds the JSON-escaped body, plus the
+# whole lines that follow it as long as they look like a PEM body: base64, the Proc-Type / DEK-Info
+# headers of a legacy encrypted key, blank lines; a base64 line may end in capture's `...[truncated]` mark
+pattern = '''-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:(?!-----BEGIN |\n\{)[\s\S]){0,8192}?-----END [A-Z ]*PRIVATE KEY-----|.*(?:\r?\n(?:[A-Za-z0-9+/=]+(?:\.\.\.\[truncated\])?|(?:Proc-Type|DEK-Info):[^\r\n]*|[ \t]*)(?![^\r\n]))*)'''
 
 [[secret]]
 name = "github_token"
