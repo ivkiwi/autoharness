@@ -128,7 +128,12 @@ def _occupied(base_dir):
         return True
     if not base_dir.is_dir():
         return base_dir.exists()  # a plain file there is the user's too, not a free slot
-    return any(p.is_symlink() or not p.is_file() or p.suffix != ".tmp" for p in base_dir.iterdir())
+    return any(p.is_symlink() or not p.is_file() or (p.suffix != ".tmp" and p.name not in _OS_DEBRIS)
+               for p in base_dir.iterdir())
+
+
+# what a file manager drops into any folder it opens; not anyone's content
+_OS_DEBRIS = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
 def _land(action, intent, body, level, name, root):

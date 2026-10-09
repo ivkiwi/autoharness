@@ -197,6 +197,16 @@ def test_create_never_replaces_a_user_file_at_the_skill_path(tmp_path):
     assert (skills / "foo").read_text() == "a user's note\n"
 
 
+def test_create_is_not_blocked_by_file_manager_debris(tmp_path):
+    # Finder drops .DS_Store into a dir a crashed create left behind; that must not lock the name forever
+    roots = _roots(tmp_path)
+    left = layer.symbol_dir("project", "foo", roots["project"])
+    left.mkdir(parents=True)
+    (left / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    v = promoter.promote(_create(), roots=roots)
+    assert v["ok"], v["findings"]
+
+
 def test_create_never_writes_into_a_handwritten_skill_dir(tmp_path):
     roots = _roots(tmp_path)
     user_dir = layer.symbol_dir("project", "foo", roots["project"])
