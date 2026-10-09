@@ -68,7 +68,7 @@ skills; compare-first additionally reads the canon Codex loads natively (`~/.age
 `<repo>/.agents/skills`), read-only.
 
 Phase 1 is propose-only: nothing lands, nothing is archived, every intent goes to
-`<repo>/.codex/autoharness/proposals/` for the shared gate. Skill reads inside shell commands are
+the shared gate queue `~/.agents/skill-gate/queue/` (the same one Claude sessions write). Skill reads inside shell commands are
 not counted (no use/view numerator on Codex yet), so graduation review must stay parked there.
 
 `~/.codex/hooks.json` fragment (merge into the existing `hooks` object; one line per event):
