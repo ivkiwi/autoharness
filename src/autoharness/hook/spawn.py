@@ -45,7 +45,8 @@ def description_index(roots=None, *, agent_only=False):
             symbol = path.parent.name
             if agent_only and not sidecar.is_agent_created(lyr, symbol, root):
                 continue  # curator only ever sees its own skills; native/user stay out of the pool
-            fm = validate._frontmatter(path.read_text(encoding="utf-8")) or {}
+            # anyone's skill can sit here; a latin-1 SKILL.md must not take the whole reflection down
+            fm = validate._frontmatter(path.read_text(encoding="utf-8", errors="replace")) or {}
             name = fm.get("name") or symbol
             desc = fm.get("description") or "(no description)"
             lines.append(f"- {name} [{lyr}]: {desc}")
