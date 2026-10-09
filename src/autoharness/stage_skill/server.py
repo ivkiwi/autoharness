@@ -176,6 +176,8 @@ def stage(params, *, run_id, root=None):
         intent_queue.append(run_id, intent, root)
     except ValueError as exc:
         return {"ok": False, "errors": [("queue", str(exc))], "intent": None}
+    except OSError:
+        return {"ok": False, "errors": [("queue", "unable to persist intent")], "intent": None}
     return {"ok": True, "errors": [], "intent": intent}
 
 
@@ -200,7 +202,11 @@ def handle(request, *, run_id, root=None):
                                                       "to the per-run intent queue, never touches the skill tree",
                                        "inputSchema": TOOL_SCHEMA}]})
     if method == "tools/call":
-        params = request.get("params") or {}
+        params = request.get("params", {})
+        if not isinstance(params, dict):
+            return _err(req_id, -32602, "params must be an object")
+        if not isinstance(params.get("arguments", {}), dict):
+            return _err(req_id, -32602, "arguments must be an object")
         if params.get("name") != TOOL_NAME:
             return _err(req_id, -32602, f"unknown tool: {params.get('name')}")
         out = stage(params.get("arguments") or {}, run_id=run_id, root=root)
