@@ -400,3 +400,20 @@ def test_moving_a_line_out_of_an_approval_section_is_an_authority_change():
     row = _row(action="patch", old_string="Post the report to Slack.\n## Routine actions\n",
                new_string="## Routine actions\nPost the report to Slack.\n")
     assert select.classify(row) == ("out_of_phase", "authority")
+
+
+def test_moving_a_parent_heading_moves_its_children_out_of_approval():
+    _skill(release.skills_dir(), "foo", BODY.format(name="foo")
+           + "# Only after approval\n## Report\nPost the report to Slack.\n# Routine actions\nFormat the date.\n")
+    row = _row(action="patch", old_string="# Only after approval\n## Report\n",
+               new_string="# Only after approval\n# Routine actions\n## Report\n")
+    assert select.classify(row) == ("out_of_phase", "authority")
+
+
+def test_a_rollback_leaves_a_notice(tmp_path):
+    base_sha = release.tree_sha256(_skill(release.skills_dir(), "foo"))
+    release.publish("foo", _candidate(tmp_path, "foo", BODY.format(name="foo") + "v2\n"),
+                    expect_sha=base_sha, event_id="e1")
+    release.rollback("foo")
+    texts = [json.loads(line)["text"] for line in (config.GATE_DIR / "notices.jsonl").read_text().splitlines()]
+    assert texts == ["rollback foo (from claude)"]

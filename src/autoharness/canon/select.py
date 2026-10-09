@@ -143,12 +143,14 @@ def classify(row):
 def _contexts(text, pattern):
     """Each line matching pattern with the heading it sits under, as a multiset: a line that moves to
     another section changes its context even when the line diff calls the heading the thing that moved."""
-    heading, out = "", Counter()
+    path, out = [], Counter()  # the whole heading chain: moving a parent heading moves its children too
     for line in text.splitlines():
-        if line.lstrip().startswith("#"):
-            heading = line.strip()
+        stripped = line.strip()
+        level = len(stripped) - len(stripped.lstrip("#"))
+        if level and stripped[level:level + 1] in (" ", ""):
+            path = [(lvl, h) for lvl, h in path if lvl < level] + [(level, stripped)]
         elif pattern(line):
-            out[(heading, line.strip())] += 1
+            out[(tuple(h for _, h in path), stripped)] += 1
     return out
 
 

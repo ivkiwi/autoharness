@@ -28,6 +28,9 @@ from pathlib import Path
 
 from autoharness import config
 from autoharness.canon import queue, release, select
+from autoharness.canon.notices import append as _append
+from autoharness.canon.notices import lines as _lines
+from autoharness.canon.notices import notify as _notify
 from autoharness.lib import lock, skills_guard
 
 CONTRACT = 2  # bump when a schema or its validation changes: the cache key carries it
@@ -101,29 +104,6 @@ def _load(path, default):
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return default
-
-
-def _append(path, entry):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as f:
-        f.seek(0, 2)
-        torn = f.tell() > 0 and (f.seek(-1, 2), f.read(1))[1] != b"\n"
-        f.write((b"\n" if torn else b"") + (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8"))
-        f.flush()
-        os.fsync(f.fileno())  # a torn tail must not swallow a notice or a decision
-
-
-def _lines(path):
-    out = []
-    if path.exists():
-        for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(entry, dict):
-                out.append(entry)
-    return out
 
 
 def _budget_file(kind):
@@ -269,12 +249,6 @@ def _published_events():
             if tx.get("op") == "committed" and tx.get("kind") == "publish" and isinstance(tx.get("event_id"), str)}
 
 
-def _notify(event_id, text):
-    p = config.GATE_DIR / "notices.jsonl"
-    if event_id not in {e.get("id") for e in _lines(p)}:
-        _append(p, {"id": event_id, "at": time.time(), "text": text})
-
-
 def _decide(row, decision, **extra):
     entry = {"id": row["id"], "name": row["intent"].get("name"), "action": row["intent"].get("action"),
              "harness": (row.get("provenance") or {}).get("harness"), "decision": decision, "at": time.time(),
@@ -287,10 +261,13 @@ def _decide(row, decision, **extra):
 
 def _reconcile(rows):
     """A publish that committed is finalized as published, notice included, whatever was decided for it
-    before (a crash, or a failure after the switch counted as an error)."""
+    before (a crash, or a failure after the switch counted as an error); a committed rollback gets its
+    notice."""
     by_id = {r["id"]: r for r in rows}
     decided = _decisions(only="published")
     for tx in release.journal_entries():
+        if tx.get("op") == "committed" and tx.get("kind") == "rollback":
+            _notify(tx["event_id"], release.rollback_notice(tx["name"]))
         if tx.get("op") == "committed" and tx.get("kind") == "publish" and tx.get("event_id") in by_id \
                 and tx["event_id"] not in decided:
             _decide(by_id[tx["event_id"]], "published", release=tx["to"]["target"],

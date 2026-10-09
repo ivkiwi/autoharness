@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from autoharness import config
+from autoharness.canon import notices
 from autoharness.lib import lock
 
 
@@ -260,4 +261,10 @@ def rollback(name):
         if to is not None and (not os.path.isdir(to["target"]) or has_links(Path(to["target"]))
                                or tree_sha256(Path(to["target"])) != to["sha"]):
             raise Conflict(f"{name}: frozen baseline {to['target']} is missing or changed")
-        return _switch("rollback", name, expect, to, f"rollback-{last['event_id']}")
+        tx = _switch("rollback", name, expect, to, f"rollback-{last['event_id']}")
+        notices.notify(tx["event_id"], rollback_notice(name))  # a crash before this: the gate pass adds it
+        return tx
+
+
+def rollback_notice(name):
+    return f"rollback {name} (from {config.HARNESS})"
