@@ -118,3 +118,26 @@ def test_sweep_orphans_does_not_follow_a_linked_skill_dir(tmp_path, dir_link):
     dir_link(skills / "linked", outside)
     assert skill_store.sweep_orphans("project", tmp_path) == []
     assert victim.exists()
+
+
+def test_sweep_orphans_does_not_walk_a_linked_archive(tmp_path, dir_link):
+    outside = tmp_path / "outside"
+    (outside / "old-ours").mkdir(parents=True)
+    (outside / "old-ours" / ".sidecar.json").write_text('{"created_by": "agent"}')
+    victim = _aged(outside / "old-ours" / "valuable.tmp")
+    skills = layer.skills_dir("project", tmp_path)
+    skills.mkdir(parents=True)
+    dir_link(skills / ".archive", outside)
+    assert skill_store.sweep_orphans("project", tmp_path) == []
+    assert victim.exists()
+
+
+def test_sweep_orphans_skips_odd_metadata_instead_of_failing(tmp_path):
+    # a sweep error would abort the whole drain before any intent is read
+    skills = layer.skills_dir("project", tmp_path)
+    for i, meta in enumerate(["[]", "null", "42", "{not json"]):
+        d = skills / f"odd{i}"
+        d.mkdir(parents=True)
+        (d / ".sidecar.json").write_text(meta)
+        _aged(d / "x.tmp")
+    assert skill_store.sweep_orphans("project", tmp_path) == []

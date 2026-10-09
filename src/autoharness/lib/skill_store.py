@@ -102,9 +102,14 @@ def _ours(d):
     if d.is_symlink() or not d.is_dir():
         return False
     try:
-        return json.loads((d / ".sidecar.json").read_text(encoding="utf-8")).get("created_by") == "agent"
+        meta = json.loads((d / ".sidecar.json").read_text(encoding="utf-8"))
+        return isinstance(meta, dict) and meta.get("created_by") == "agent"
     except (OSError, ValueError):
+        pass
+    try:
         return all(p.is_file() and p.suffix == ".tmp" for p in d.iterdir())
+    except OSError:
+        return False  # unreadable: not something we can tell is ours
 
 
 def sweep_orphans(lyr, root=None):
@@ -114,7 +119,8 @@ def sweep_orphans(lyr, root=None):
     removed = []
     cutoff = time.time() - ORPHAN_TMP_MIN_AGE_S
     archive = layer.archive_dir(lyr, root)
-    dirs = [*skills.iterdir(), *(archive.iterdir() if archive.is_dir() else [])]
+    linked = archive.is_symlink()  # a linked .archive leads outside the layer: never walk it
+    dirs = [*skills.iterdir(), *(archive.iterdir() if archive.is_dir() and not linked else [])]
     for tmp in (t for d in dirs if _ours(d) for t in d.rglob("*.tmp")):
         try:
             if tmp.stat().st_mtime > cutoff:
