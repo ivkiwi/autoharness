@@ -91,12 +91,22 @@ def restore(lyr, name, root=None):
     return dest
 
 
+# an atomic write lives as a .tmp for milliseconds; a younger one may be another hook's write in flight
+ORPHAN_TMP_MIN_AGE_S = 60
+
+
 def sweep_orphans(lyr, root=None):
     skills = layer.skills_dir(lyr, root)
     if not skills.exists():
         return []
     removed = []
+    cutoff = time.time() - ORPHAN_TMP_MIN_AGE_S
     for tmp in skills.rglob("*.tmp"):
-        tmp.unlink()
+        try:
+            if tmp.stat().st_mtime > cutoff:
+                continue
+            tmp.unlink()
+        except FileNotFoundError:
+            continue  # its writer renamed it into place meanwhile
         removed.append(tmp)
     return removed

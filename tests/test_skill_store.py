@@ -1,3 +1,6 @@
+import os
+import time
+
 import pytest
 
 from autoharness.lib import layer, skill_store
@@ -55,9 +58,22 @@ def test_archive_restore_roundtrip_preserves_sidecar(tmp_path):
 def test_sweep_orphans_removes_tmp_keeps_live(tmp_path):
     sdir = layer.symbol_dir("project", "foo", tmp_path)
     sdir.mkdir(parents=True)
-    (sdir / "SKILL.md.dead.tmp").write_text("half-written")
+    dead = sdir / "SKILL.md.dead.tmp"
+    dead.write_text("half-written")
+    old = time.time() - skill_store.ORPHAN_TMP_MIN_AGE_S - 1
+    os.utime(dead, (old, old))
     skill_store.write_body("project", "foo", "real", tmp_path)
     removed = skill_store.sweep_orphans("project", tmp_path)
     assert removed and all(str(r).endswith(".tmp") for r in removed)
     assert skill_store.read_body("project", "foo", tmp_path) == "real"  # live file intact
     assert list(layer.skills_dir("project", tmp_path).rglob("*.tmp")) == []
+
+
+def test_sweep_orphans_leaves_a_tmp_that_may_still_be_in_flight(tmp_path):
+    # another hook's atomic write sits as a fresh .tmp until its rename; deleting it loses that write
+    sdir = layer.symbol_dir("project", "foo", tmp_path)
+    sdir.mkdir(parents=True)
+    fresh = sdir / ".sidecar.json.abc12345.tmp"
+    fresh.write_text("{}")
+    assert skill_store.sweep_orphans("project", tmp_path) == []
+    assert fresh.exists()
