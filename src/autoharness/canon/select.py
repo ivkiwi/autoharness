@@ -185,7 +185,7 @@ def _workspace_repos(project_root):
     """Names of the git repositories directly under a workspace root: a lesson naming one is about it."""
     d = _project_dir(project_root)
     try:
-        return {c.name for c in d.iterdir() if c.is_dir() and (c / ".git").exists() and len(c.name) >= 4}
+        return {c.name for c in d.iterdir() if c.is_dir() and (c / ".git").exists()}  # short names too: api
     except OSError:
         return set()
 

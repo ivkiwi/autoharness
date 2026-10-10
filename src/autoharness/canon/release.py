@@ -276,10 +276,11 @@ def sync_projection(name):
     entry = skills_dir() / name
     for root in config.PROJECTION_ROOTS:
         link = root / name
-        ours = link.is_symlink() and (link.parent / os.readlink(link)).resolve(strict=False) == entry.resolve(strict=False)
+        # an absolute target: it reads the same whether or not the projection root is itself a link
+        ours = link.is_symlink() and os.readlink(link) == str(entry)
         if os.path.lexists(entry) and not os.path.lexists(link):
             root.mkdir(parents=True, exist_ok=True)
-            os.symlink(os.path.relpath(entry, root), link)
+            os.symlink(str(entry), link)
         elif not os.path.lexists(entry) and ours:
             link.unlink()
 

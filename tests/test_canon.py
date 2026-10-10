@@ -576,3 +576,33 @@ def test_a_workspace_lesson_about_one_of_its_repos_stays_with_that_repo(tmp_path
     row = _row(level="project", body=BODY.format(name="foo") + "Keep notes short.\n")
     row["project_root"] = str(workspace / ".claude")
     assert select.classify(row)[0] == "eligible"
+
+
+def test_a_foreign_cyclic_link_in_a_projection_root_is_left_alone(tmp_path):
+    root = config.PROJECTION_ROOTS[0]
+    root.mkdir(parents=True)
+    (root / "bar").symlink_to(root / "bar")  # someone's broken loop
+    release.publish("bar", _candidate(tmp_path, "bar", BODY.format(name="bar")), expect_sha=None, event_id="e1")
+    release.rollback("bar")
+    assert (root / "bar").is_symlink() and os.readlink(root / "bar") == str(root / "bar")
+
+
+def test_a_projection_root_that_is_itself_a_link_still_sees_the_skill(tmp_path, monkeypatch):
+    real = tmp_path / "real-skills"
+    real.mkdir()
+    alias = tmp_path / "alias-skills"
+    alias.symlink_to(real)
+    monkeypatch.setattr(config, "PROJECTION_ROOTS", [alias])
+    release.publish("bar", _candidate(tmp_path, "bar", BODY.format(name="bar")), expect_sha=None, event_id="e1")
+    assert (alias / "bar" / "SKILL.md").read_text() == BODY.format(name="bar")
+    release.rollback("bar")
+    assert not os.path.lexists(real / "bar")
+
+
+def test_a_short_repo_name_is_still_a_repo(tmp_path, monkeypatch):
+    workspace = tmp_path / "Projects"
+    (workspace / "api" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(config, "GATE_WORKSPACE_ROOTS", [workspace])
+    row = _row(level="project", body=BODY.format(name="foo") + "Edit api/src/date.py first.\n")
+    row["project_root"] = str(workspace / ".claude")
+    assert select.classify(row) == ("out_of_phase", "project_specific:api")
