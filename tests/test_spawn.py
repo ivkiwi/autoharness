@@ -453,3 +453,15 @@ def test_reflector_and_curator_run_on_their_own_effort():
     curator, _ = spawn._carrier(config.CURATOR_AGENT, "r1", "/p/.claude", "claude")
     assert reflector[reflector.index("--effort") + 1] == config.REFLECTOR_EFFORT == "high"
     assert curator[curator.index("--effort") + 1] == config.CURATOR_EFFORT == "xhigh"
+
+
+def test_the_fork_carrier_keeps_the_reflector_effort(tmp_path, monkeypatch):
+    from autoharness import config
+    from autoharness.hook import spawn
+    from autoharness.lib import layer
+    seen = []
+    monkeypatch.setattr(config, "REFLECTOR_CARRIER", "fork")
+    roots = {layer.PROJECT: tmp_path / "p", layer.GLOBAL: tmp_path / "g"}
+    spawn.run("window", "r1", roots=roots, session_id="s-1",
+              spawn_fn=lambda argv, env, payload: seen.append(argv))
+    assert seen[0][seen[0].index("--effort") + 1] == config.REFLECTOR_EFFORT

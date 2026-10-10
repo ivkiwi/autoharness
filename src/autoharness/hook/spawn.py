@@ -134,9 +134,9 @@ FORK_INSTRUCTION = (
 )
 
 
-def build_fork_command(*, session_id, claude_bin):
+def build_fork_command(*, session_id, claude_bin, effort=None):
     return [claude_bin, "-p", "--resume", str(session_id), "--fork-session",
-            "--dangerously-skip-permissions"]
+            "--dangerously-skip-permissions", *(["--effort", effort] if effort else [])]
 
 
 def build_fork_prompt(index, spec):
@@ -307,7 +307,8 @@ def run(window_text, run_id, *, roots, repo_name=None, agent=None, claude_bin=No
     carrier = carrier or config.REFLECTOR_CARRIER
     with _child_cwd() as cwd:
         if carrier == "fork" and session_id and layer.HARNESS != "codex":  # no session to fork -> bundle chain (fail-safe)
-            argv = build_fork_command(session_id=session_id, claude_bin=claude_bin or config.CLAUDE_BIN)
+            argv = build_fork_command(session_id=session_id, claude_bin=claude_bin or config.CLAUDE_BIN,
+                                      effort=config.REFLECTOR_EFFORT)
             payload = build_fork_prompt(description_index(roots), spec)  # -p reads the prompt from stdin
         else:
             argv, preface = _carrier(agent or config.REFLECTOR_AGENT, run_id, proot, claude_bin, cwd=cwd)
