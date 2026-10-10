@@ -509,3 +509,9 @@ def test_the_home_folder_is_a_workspace_root_too(tmp_path, monkeypatch):
     row = _row(level="project")
     row["project_root"] = str(home / ".claude")  # a session started in ~ keeps its project layer at ~/.claude
     assert select.classify(row)[0] == "eligible"
+
+
+def test_an_ordinary_new_skill_is_not_an_authority_change():
+    body = ("---\nname: foo\ndescription: Use when formatting a date.\n---\n# Dates\n"
+            "Never guess the timezone; ask before you assume one.\n## Format\nUse ISO 8601.\n")
+    assert select.classify(_row(body=body)) == ("eligible", body)

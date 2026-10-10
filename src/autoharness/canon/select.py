@@ -18,6 +18,7 @@ from autoharness.lib import layer, skill_store, skills_guard, validate
 PHASE1_ACTIONS = ("create", "update", "patch")
 # a rejection the gate may still take over: the promoter only refused to write somewhere it does not own
 _TAKEOVER = {"self_produced"}
+RULES = 2  # bump when eligibility changes: out_of_phase decisions made under older rules are reconsidered
 _GLOBAL_OFF = "AUTOHARNESS_DISABLE_GLOBAL"
 _UNRESOLVED = "unresolved/illegal level: None"
 # What a skill must never grant on its own: approval bypasses, privilege, outward sends, spending,
@@ -233,7 +234,9 @@ def check_change(intent, baseline, body, project_root=None, base_dir=None):
     restrictions_lost = _contexts(baseline, RESTRICTION.search) - _contexts(body, RESTRICTION.search)
     # fail closed on structure: with any authority or restriction line in the skill, a change that touches
     # a heading, an underline or a fence is not judged by a parser that might be fooled; it waits
-    sensitive = any(_authority(x) or RESTRICTION.search(x) for x in (baseline + "\n" + body).splitlines())
+    # moving and restructuring only exist for a change to a live skill: a new one has no section to leave
+    modifies = bool(baseline)
+    sensitive = modifies and any(_authority(x) or RESTRICTION.search(x) for x in (baseline + "\n" + body).splitlines())
     restructured = any(_STRUCTURAL.match(x) for x in (added + "\n" + removed).splitlines() if x.strip())
     if skills_guard.scan(body) or any(p.search(added) or p.search(removed) for p in AUTHORITY) \
             or RESTRICTION.search(removed) or restrictions_lost or (sensitive and restructured) \

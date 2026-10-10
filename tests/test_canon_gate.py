@@ -318,3 +318,12 @@ def test_a_recovered_rollback_notice_keeps_who_rolled_back(canon_foo, monkeypatc
     gate.run_once(Fake(secret="never-in-a-prompt"))  # this pass runs as claude
     texts = [json.loads(line)["text"] for line in (config.GATE_DIR / "notices.jsonl").read_text().splitlines()]
     assert texts[-1] == "rollback foo (from codex)"
+
+
+def test_out_of_phase_decisions_from_older_rules_are_reconsidered(canon_foo, monkeypatch):
+    _queue_patch()
+    config.GATE_DIR.mkdir(parents=True, exist_ok=True)
+    row = queue.read()[0]
+    (config.GATE_DIR / "decisions.jsonl").write_text(json.dumps(
+        {"id": row["id"], "decision": "out_of_phase", "reason": "scope", "rules": 1}) + "\n")
+    assert gate.run_once(Fake())["decision"] == "published"  # looked at again under the current rules

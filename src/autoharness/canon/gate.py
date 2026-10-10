@@ -240,8 +240,10 @@ def decide(cases, baseline_answers, candidate_answers):
 
 
 def _decisions(only=None):
+    # an out_of_phase verdict is only as final as the rules that made it: a newer rule set looks again
     return {e["id"] for e in _lines(config.GATE_DIR / "decisions.jsonl")
-            if isinstance(e.get("id"), str) and (only is None or e.get("decision") == only)}
+            if isinstance(e.get("id"), str) and (only is None or e.get("decision") == only)
+            and not (e.get("decision") == "out_of_phase" and e.get("rules") != select.RULES)}
 
 
 def _published_events():
@@ -252,7 +254,7 @@ def _published_events():
 def _decide(row, decision, **extra):
     entry = {"id": row["id"], "name": row["intent"].get("name"), "action": row["intent"].get("action"),
              "harness": (row.get("provenance") or {}).get("harness"), "decision": decision, "at": time.time(),
-             **extra}
+             "rules": select.RULES, **extra}
     if decision == "published":  # the notice goes first: a crash after it leaves no silent publish
         _notify(row["id"], f"{entry['action']} {entry['name']} (from {entry['harness']})")
     _append(config.GATE_DIR / "decisions.jsonl", entry)
