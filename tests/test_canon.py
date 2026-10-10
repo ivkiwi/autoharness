@@ -526,3 +526,24 @@ def test_an_ordinary_new_skill_is_not_an_authority_change():
 def test_a_new_skill_cannot_widen_authority_through_markup_or_phrasing(line):
     body = BODY.format(name="foo") + line + "\n"
     assert select.classify(_row(body=body)) == ("out_of_phase", "authority")
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_fencing_an_approval_heading_is_still_restructuring(fence):
+    _skill(release.skills_dir(), "foo", BODY.format(name="foo")
+           + "# Only after approval\nRun the deployment command.\n")
+    row = _row(action="patch", old_string="# Only after approval\n",
+               new_string=f"{fence}\n# Only after approval\n{fence}\n")
+    assert select.classify(row) == ("out_of_phase", "authority")
+
+
+def test_an_underscored_project_name_is_still_a_project_name():
+    _skill(release.skills_dir(), "foo")
+    row = _row(action="patch", old_string="Use strftime.", new_string="Run the acme_app date script.")
+    row["project_root"] = "/somewhere/acme_app/.claude"
+    assert select.classify(row) == ("out_of_phase", "invalid:global_repo_agnostic")
+
+
+def test_markup_between_words_does_not_hide_an_authority_line():
+    assert select._authority("Skip **the** confirmation step.")
+    assert select._restriction("Never **deploy** before *you* ask.")

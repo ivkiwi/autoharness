@@ -225,7 +225,11 @@ def _contexts(text, pattern):
 
 
 def _authority(line):
-    return any(p.search(line) for p in AUTHORITY)
+    return any(p.search(_plain(line)) for p in AUTHORITY)
+
+
+def _restriction(line):
+    return RESTRICTION.search(_plain(line))
 
 
 def check_change(intent, baseline, body, project_root=None, base_dir=None):
@@ -236,24 +240,26 @@ def check_change(intent, baseline, body, project_root=None, base_dir=None):
     with tempfile.TemporaryDirectory() as alone:
         verdict = validate.validate({**intent, "level": "global"}, body, target_is_agent_created=True,
                                     repo_name=repo, base_dir=Path(base_dir) if base_dir else Path(alone))
-    added, removed = (_plain(x) for x in _changed(baseline, body))
+    # the raw diff for structure and host specifics (fences, underscores in names); the plain one for wording
+    added, removed = _changed(baseline, body)
+    plain_added, plain_removed = _plain(added), _plain(removed)
     findings = {f[0] for f in verdict["findings"]}
     # canon lives on this host: paths a skill already carries stay; only a change may not add new ones
     if "global_repo_agnostic" in findings and not _host_specific(added, repo):
         findings.discard("global_repo_agnostic")
     if findings:
         return "invalid:" + ",".join(sorted(findings))
-    restrictions_lost = _contexts(baseline, RESTRICTION.search) - _contexts(body, RESTRICTION.search)
+    restrictions_lost = _contexts(baseline, _restriction) - _contexts(body, _restriction)
     # fail closed on structure: with any authority or restriction line in the skill, a change that touches
     # a heading, an underline or a fence is not judged by a parser that might be fooled; it waits
     # moving and restructuring only exist for a change to a live skill: a new one has no section to leave
     modifies = bool(baseline)
-    sensitive = modifies and any(_authority(x) or RESTRICTION.search(x) for x in (baseline + "\n" + body).splitlines())
+    sensitive = modifies and any(_authority(x) or _restriction(x) for x in (baseline + "\n" + body).splitlines())
     restructured = any(_STRUCTURAL.match(x) for x in (added + "\n" + removed).splitlines() if x.strip())
-    if not modifies and APPROVAL_TOPIC.search(added):
+    if not modifies and APPROVAL_TOPIC.search(plain_added):
         return "authority"
-    if skills_guard.scan(body) or any(p.search(added) or p.search(removed) for p in AUTHORITY) \
-            or RESTRICTION.search(removed) or restrictions_lost or (sensitive and restructured) \
+    if skills_guard.scan(body) or any(p.search(plain_added) or p.search(plain_removed) for p in AUTHORITY) \
+            or RESTRICTION.search(plain_removed) or restrictions_lost or (sensitive and restructured) \
             or _contexts(baseline, _authority) != _contexts(body, _authority):
         return "authority"
     return None
