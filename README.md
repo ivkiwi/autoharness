@@ -154,7 +154,9 @@ configure unless you want to change the pace.
 | `AUTOHARNESS_DISABLE_GLOBAL` | `0` | Set to `1` for a project-only deployment. Global create intents are rejected before staging and landing; global request/use/view counters, archiving, orphan sweeps, recall, curator snapshots, and metrics are skipped. Existing global skills stay untouched. Project-layer learning continues normally. |
 | `AUTOHARNESS_HARNESS` | `claude` | Which host runs the hooks. `codex` moves every root under `~/.codex` and `<repo>/.codex`, runs the reflector as `codex exec -s read-only --ephemeral`, and keeps unreflected tails as notes (see [Codex](#codex-manual-install-phase-1)). |
 | `AUTOHARNESS_INDEX_ROOTS` | codex: `~/.agents/skills:{project}/.agents/skills`, claude: empty | Extra skill roots offered to compare-first as read-only canon (`[canon]` lines), `os.pathsep`-separated; `{project}` is the repo. Never written, never curated. |
-| `AUTOHARNESS_CODEX_BIN` / `AUTOHARNESS_CODEX_MODEL` / `AUTOHARNESS_CODEX_EFFORT` | `codex` / `gpt-6-luna` / `low` | The Codex carrier: executable, reflector model (empty = the model Codex is configured with) and reasoning effort. |
+| `AUTOHARNESS_CODEX_BIN` / `AUTOHARNESS_CODEX_MODEL` | `codex` / `gpt-6.1-sol` | The Codex carrier: executable and model (empty = the model Codex is configured with). |
+| `AUTOHARNESS_REFLECTOR_EFFORT` / `AUTOHARNESS_CURATOR_EFFORT` | `high` / `xhigh` | Effort of the reflector and the curator in both harnesses (Claude: `--effort`, the model comes from the agent file, `opus`; Codex: `model_reasoning_effort`). |
+| `AUTOHARNESS_GATE_PLANNER_EFFORT` / `AUTOHARNESS_GATE_REPLAY_EFFORT` | `high` / `medium` | Effort of the canon gate's case planner and replay. |
 
 **Cadence — when it learns**
 

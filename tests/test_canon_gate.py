@@ -36,8 +36,9 @@ class Fake:
     def __init__(self, answer=honest, cases=CASES, secret="Prefer ISO 8601"):
         self.answer, self.cases, self.calls, self.secret = answer, cases, [], secret
 
-    def __call__(self, prompt, schema, model):
+    def __call__(self, prompt, schema, model, effort):
         self.calls.append(model)
+        self.efforts = [*getattr(self, "efforts", []), effort]
         if "freeze an evaluation" in prompt:
             assert self.secret not in prompt  # the planner never sees the candidate
             return {"cases": self.cases}
@@ -338,3 +339,11 @@ def test_a_projection_a_crash_left_out_is_added_by_the_next_pass(canon_foo, monk
             gate.run_once(Fake(secret="zz-not-in-any-prompt"))
     gate.run_once(Fake(secret="never-in-a-prompt"))
     assert (config.PROJECTION_ROOTS[0] / "bar").is_symlink()
+
+
+def test_gate_calls_never_run_below_medium(canon_foo):
+    _queue_patch()
+    fake = Fake()
+    gate.run_once(fake)
+    assert fake.efforts == [config.GATE_PLANNER_EFFORT, config.GATE_REPLAY_EFFORT, config.GATE_REPLAY_EFFORT]
+    assert {"low", "minimal", ""}.isdisjoint(fake.efforts)

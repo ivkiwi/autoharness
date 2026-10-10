@@ -75,8 +75,11 @@ HARNESS = layer.HARNESS  # "claude" (default) or "codex": set by the hook comman
 # Codex carrier: no plugin and no --agent, so the agent prompt rides stdin ahead of the bundle;
 # `-s read-only` is the write backstop, `--ephemeral` leaves no rollout for other collectors to mistake for work.
 CODEX_BIN = os.environ.get("AUTOHARNESS_CODEX_BIN", "codex")
-CODEX_MODEL = os.environ.get("AUTOHARNESS_CODEX_MODEL", "gpt-6-luna")  # the cheap tier on this account; empty = whatever Codex is configured with
-CODEX_EFFORT = os.environ.get("AUTOHARNESS_CODEX_EFFORT", "low")
+CODEX_MODEL = os.environ.get("AUTOHARNESS_CODEX_MODEL", "gpt-6.1-sol")  # empty = whatever Codex is configured with
+# what is worth learning, and at which level, is a judgement call: reflection and curation do not run on
+# a cheap tier (Claude: the agents' model; Codex: CODEX_MODEL). Efforts apply to both harnesses.
+REFLECTOR_EFFORT = os.environ.get("AUTOHARNESS_REFLECTOR_EFFORT", "high")
+CURATOR_EFFORT = os.environ.get("AUTOHARNESS_CURATOR_EFFORT", "xhigh")
 # extra compare-first roots beyond the managed layers, os.pathsep-separated; `{project}` = the repo
 # (the project root's parent). Codex reads the shared canon (~/.agents/skills and <repo>/.agents/skills)
 # natively, so its reflector must see it or it proposes duplicates. Never written by autoharness.
@@ -156,3 +159,5 @@ GATE_DAILY_CANDIDATES = _int_env("AUTOHARNESS_GATE_DAILY_CANDIDATES", 1)  # cons
 # harness keeps there is everyone's, so the gate treats lessons routed to it as global candidates
 GATE_WORKSPACE_ROOTS = [Path(p).expanduser() for p in
                         os.environ.get("AUTOHARNESS_GATE_WORKSPACE_ROOTS", "").split(os.pathsep) if p]
+GATE_PLANNER_EFFORT = os.environ.get("AUTOHARNESS_GATE_PLANNER_EFFORT", "high")
+GATE_REPLAY_EFFORT = os.environ.get("AUTOHARNESS_GATE_REPLAY_EFFORT", "medium")  # never below medium

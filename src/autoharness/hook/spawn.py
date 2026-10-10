@@ -220,24 +220,26 @@ def _codex_skill_dirs(proot):
 def _carrier(agent, run_id, proot, claude_bin=None, cwd=None):
     """(argv, preface): what runs the agent and what must precede the bundle on stdin. `cwd` is the
     child's working directory (Codex: from _child_cwd); never the repo."""
+    effort = config.CURATOR_EFFORT if agent == config.CURATOR_AGENT else config.REFLECTOR_EFFORT
     if layer.HARNESS == "codex":
         argv = build_codex_command(codex_bin=config.CODEX_BIN, run_id=run_id, proot=proot,
                                    cwd=cwd or tempfile.gettempdir(),
-                                   model=config.CODEX_MODEL, effort=config.CODEX_EFFORT)
+                                   model=config.CODEX_MODEL, effort=effort)
         where = ", ".join(str(d) for d in _codex_skill_dirs(proot))
         preface = (CODEX_PREFACE + f"Existing skills live under {where}; read <dir>/<name>/SKILL.md "
                    "by absolute path, your working directory holds nothing.\n\n")
         return argv, preface + agent_prompt(agent) + "\n"
-    return build_command(agent=agent, claude_bin=claude_bin or config.CLAUDE_BIN), ""
+    return build_command(agent=agent, claude_bin=claude_bin or config.CLAUDE_BIN, effort=effort), ""
 
 
-def build_command(*, agent, claude_bin):
+def build_command(*, agent, claude_bin, effort=None):
     # Reflection is an unattended background job — nobody is there to approve tool calls, so skip the
     # permission prompt. The security boundary is held by the agent's tools allowlist
     # (Read/Grep/Glob/stage_skill) + the top-level PreToolUse write backstop, not by the prompt.
     # (live e2e: a reflector's real stage_skill call gets blocked by the permission gate and can only
     # "narrate"; only with this flag does it land.)
-    return [claude_bin, "-p", "--agent", agent, "--dangerously-skip-permissions"]
+    return [claude_bin, "-p", "--agent", agent, "--dangerously-skip-permissions",
+            *(["--effort", effort] if effort else [])]
 
 
 def child_env(run_id, root, *, base_env=None):

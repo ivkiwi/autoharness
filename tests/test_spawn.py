@@ -444,3 +444,12 @@ def test_description_index_survives_a_foreign_skill_that_is_not_utf8(tmp_path):
     (legacy / "SKILL.md").write_bytes(b"---\nname: legacy\ndescription: caf\xe9 notes\n---\nbody\n")
     out = spawn.description_index(roots)
     assert "- legacy [project]: caf" in out
+
+
+def test_reflector_and_curator_run_on_their_own_effort():
+    from autoharness import config
+    from autoharness.hook import spawn
+    reflector, _ = spawn._carrier(config.REFLECTOR_AGENT, "r1", "/p/.claude", "claude")
+    curator, _ = spawn._carrier(config.CURATOR_AGENT, "r1", "/p/.claude", "claude")
+    assert reflector[reflector.index("--effort") + 1] == config.REFLECTOR_EFFORT == "high"
+    assert curator[curator.index("--effort") + 1] == config.CURATOR_EFFORT == "xhigh"

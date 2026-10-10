@@ -132,13 +132,13 @@ def _reserve_candidate(event_id):
         _save(p, ids + [event_id])
 
 
-def claude_runner(prompt, schema, model):
+def claude_runner(prompt, schema, model, effort="medium"):
     """One isolated structured call: no CLAUDE.md, skills, plugins, hooks or MCP, no tools, in an empty dir."""
     env = {**os.environ, config.CHILD_SESSION_ENV: "1"}
     with tempfile.TemporaryDirectory() as cwd:
         proc = subprocess.run(
             [config.CLAUDE_BIN, "-p", "--safe-mode", "--strict-mcp-config", "--tools", "",
-             "--no-session-persistence", "--model", model, "--output-format", "json",
+             "--no-session-persistence", "--model", model, "--effort", effort, "--output-format", "json",
              "--json-schema", json.dumps(schema)],
             input=prompt, capture_output=True, text=True, encoding="utf-8", cwd=cwd, env=env,
             timeout=config.GATE_CALL_TIMEOUT_S, check=False)
@@ -150,9 +150,9 @@ def claude_runner(prompt, schema, model):
     return out["structured_output"]
 
 
-def _call(prompt, schema, model, check, runner):
+def _call(prompt, schema, model, check, runner, effort):
     """A contract-valid reply from cache, else one budgeted call whose reply must pass `check`."""
-    key = _digest({"contract": CONTRACT, "model": model, "prompt": prompt, "schema": schema})
+    key = _digest({"contract": CONTRACT, "model": model, "effort": effort, "prompt": prompt, "schema": schema})
     cache = config.GATE_DIR / "cache" / f"{key}.json"
     if cache.exists():
         try:
@@ -162,7 +162,7 @@ def _call(prompt, schema, model, check, runner):
         except (ValueError, KeyError, TypeError, AttributeError):
             cache.unlink()  # a cache that no longer passes is not evidence; ask again
     _reserve_call()
-    reply = runner(prompt, schema, model)
+    reply = runner(prompt, schema, model, effort)
     try:
         check(reply)
     except (KeyError, TypeError, AttributeError) as exc:
@@ -300,12 +300,13 @@ def evaluate(row, runner=claude_runner):
     _reserve_candidate(row["id"])
     planner = PLANNER_PROMPT.format(name=name, action=intent["action"], reason=intent.get("reason", ""),
                                     evidence=intent.get("evidence", ""), baseline=baseline)
-    cases = _call(planner, CASES_SCHEMA, config.GATE_PLANNER_MODEL, _check_cases, runner)["cases"]
+    cases = _call(planner, CASES_SCHEMA, config.GATE_PLANNER_MODEL, _check_cases, runner,
+                  config.GATE_PLANNER_EFFORT)["cases"]
     tasks = json.dumps([{"id": c["id"], "task": c["task"], "actions": c["actions"]} for c in cases],
                        ensure_ascii=False)
     check = _answers_check(cases)
     answers = [_call(REPLAY_PROMPT.format(skill=skill, tasks=tasks), ANSWERS_SCHEMA, config.GATE_REPLAY_MODEL,
-                     check, runner)["answers"] for skill in (baseline, body)]
+                     check, runner, config.GATE_REPLAY_EFFORT)["answers"] for skill in (baseline, body)]
     verdict, detail = decide(cases, *answers)
     run = config.GATE_DIR / "runs" / row["id"]
     _save(run / "evaluation.json", {"cases": cases, "baseline": answers[0], "candidate": answers[1],

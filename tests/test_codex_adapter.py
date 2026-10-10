@@ -483,11 +483,11 @@ def test_codex_reflector_provenance_reaches_the_shared_queue(codex, repo, tmp_pa
 
 def test_codex_carrier_command_registers_stage_skill_and_guards_the_child(codex, repo):
     argv = spawn.build_codex_command(codex_bin="codex", run_id="run-7", proot=repo / ".codex", cwd=repo,
-                                     model="gpt-6-luna", effort="low")
+                                     model="gpt-6.1-sol", effort="high")
     assert argv[:4] == ["codex", "exec", "-s", "read-only"] and argv[-1] == "-"
     assert "--ephemeral" in argv and "--skip-git-repo-check" in argv
     assert argv[argv.index("-C") + 1] == str(repo)
-    assert argv[argv.index("-m") + 1] == "gpt-6-luna"
+    assert argv[argv.index("-m") + 1] == "gpt-6.1-sol"
     overrides = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
     assert 'mcp_servers.stage_skill.args=["-m","autoharness.stage_skill.server"]' in overrides
     assert any(o.startswith("mcp_servers.stage_skill.command=") for o in overrides)
@@ -495,7 +495,7 @@ def test_codex_carrier_command_registers_stage_skill_and_guards_the_child(codex,
     assert f'mcp_servers.stage_skill.env.{config.PROJECT_ROOT_ENV}="{repo / ".codex"}"' in overrides
     assert f'mcp_servers.stage_skill.env.{config.CHILD_SESSION_ENV}="1"' in overrides
     assert f'mcp_servers.stage_skill.env.{layer.HARNESS_ENV}="codex"' in overrides
-    assert 'model_reasoning_effort="low"' in overrides
+    assert 'model_reasoning_effort="high"' in overrides
 
 
 def test_codex_child_has_a_closed_tool_set(codex, repo):
