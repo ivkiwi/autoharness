@@ -327,3 +327,14 @@ def test_out_of_phase_decisions_from_older_rules_are_reconsidered(canon_foo, mon
     (config.GATE_DIR / "decisions.jsonl").write_text(json.dumps(
         {"id": row["id"], "decision": "out_of_phase", "reason": "scope", "rules": 1}) + "\n")
     assert gate.run_once(Fake())["decision"] == "published"  # looked at again under the current rules
+
+
+def test_a_projection_a_crash_left_out_is_added_by_the_next_pass(canon_foo, monkeypatch):
+    queue.append("r2", [{"action": "create", "name": "bar", "level": "global", "body": CAND.replace("foo", "bar"),
+                         "reason": "r", "evidence": "e", "stage_id": "s2"}], [{"ok": True}])
+    with monkeypatch.context() as m:
+        m.setattr(release, "sync_projection", lambda name: (_ for _ in ()).throw(KeyboardInterrupt))
+        with pytest.raises(KeyboardInterrupt):
+            gate.run_once(Fake(secret="zz-not-in-any-prompt"))
+    gate.run_once(Fake(secret="never-in-a-prompt"))
+    assert (config.PROJECTION_ROOTS[0] / "bar").is_symlink()

@@ -547,3 +547,32 @@ def test_an_underscored_project_name_is_still_a_project_name():
 def test_markup_between_words_does_not_hide_an_authority_line():
     assert select._authority("Skip **the** confirmation step.")
     assert select._restriction("Never **deploy** before *you* ask.")
+
+
+def test_a_published_create_is_projected_for_claude_and_its_rollback_removes_only_our_link(tmp_path):
+    release.publish("bar", _candidate(tmp_path, "bar", BODY.format(name="bar")), expect_sha=None, event_id="e1")
+    link = config.PROJECTION_ROOTS[0] / "bar"
+    assert link.is_symlink() and (link / "SKILL.md").read_text() == BODY.format(name="bar")
+    release.rollback("bar")
+    assert not os.path.lexists(link)
+
+
+def test_projection_never_clobbers_a_users_own_entry(tmp_path):
+    mine = _skill(config.PROJECTION_ROOTS[0], "bar", "my own")
+    base_sha = release.tree_sha256(_skill(release.skills_dir(), "bar"))
+    release.publish("bar", _candidate(tmp_path, "bar", BODY.format(name="bar") + "v2\n"),
+                    expect_sha=base_sha, event_id="e1")
+    assert not mine.is_symlink() and (mine / "SKILL.md").read_text() == "my own"
+
+
+def test_a_workspace_lesson_about_one_of_its_repos_stays_with_that_repo(tmp_path, monkeypatch):
+    workspace = tmp_path / "Projects"
+    (workspace / "acmeapp" / ".git").mkdir(parents=True)
+    (workspace / "notes").mkdir()  # not a repo: its name means nothing
+    monkeypatch.setattr(config, "GATE_WORKSPACE_ROOTS", [workspace])
+    row = _row(level="project", body=BODY.format(name="foo") + "In acmeapp, run the date script.\n")
+    row["project_root"] = str(workspace / ".claude")
+    assert select.classify(row) == ("out_of_phase", "project_specific:acmeapp")
+    row = _row(level="project", body=BODY.format(name="foo") + "Keep notes short.\n")
+    row["project_root"] = str(workspace / ".claude")
+    assert select.classify(row)[0] == "eligible"

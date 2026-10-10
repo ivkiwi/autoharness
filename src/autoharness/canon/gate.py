@@ -267,6 +267,8 @@ def _reconcile(rows):
     notice."""
     by_id = {r["id"]: r for r in rows}
     decided = _decisions(only="published")
+    for name in {tx["name"] for tx in release.journal_entries() if tx.get("op") == "committed"}:
+        release.sync_projection(name)  # links a crash left out (or in) after a switch
     for tx in release.journal_entries():
         if tx.get("op") == "committed" and tx.get("kind") == "rollback":
             _notify(tx["event_id"], release.rollback_notice(tx))

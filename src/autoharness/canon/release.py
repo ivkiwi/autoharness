@@ -240,7 +240,9 @@ def publish(name, candidate, *, expect_sha, event_id):
         # the baseline is frozen too, so a rollback lands on a verified copy even if the original moves
         frozen = freeze(name, skills_dir() / name) if live["kind"] != "absent" else None
         baseline = {"target": frozen[0], "sha": frozen[1]} if frozen else None
-        return _switch("publish", name, live, {"target": target, "sha": sha}, event_id, baseline=baseline)
+        tx = _switch("publish", name, live, {"target": target, "sha": sha}, event_id, baseline=baseline)
+        sync_projection(name)  # a crash before this: the gate pass syncs it again
+        return tx
 
 
 def _last_committed(name):
@@ -263,8 +265,23 @@ def rollback(name):
                                or tree_sha256(Path(to["target"])) != to["sha"]):
             raise Conflict(f"{name}: frozen baseline {to['target']} is missing or changed")
         tx = _switch("rollback", name, expect, to, f"rollback-{last['event_id']}")
+        sync_projection(name)
         notices.notify(tx["event_id"], rollback_notice(tx))  # a crash before this: the gate pass adds it
         return tx
+
+
+def sync_projection(name):
+    """Derived state, safe to repeat: a live canon entry gets a link in every projection root that has
+    nothing of that name; a gone one loses only a link that points at it. Anything else is left alone."""
+    entry = skills_dir() / name
+    for root in config.PROJECTION_ROOTS:
+        link = root / name
+        ours = link.is_symlink() and (link.parent / os.readlink(link)).resolve(strict=False) == entry.resolve(strict=False)
+        if os.path.lexists(entry) and not os.path.lexists(link):
+            root.mkdir(parents=True, exist_ok=True)
+            os.symlink(os.path.relpath(entry, root), link)
+        elif not os.path.lexists(entry) and ours:
+            link.unlink()
 
 
 def rollback_notice(tx):

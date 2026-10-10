@@ -181,6 +181,15 @@ def _workspace(project_root):
     return d is not None and any(d.resolve() == w.resolve() for w in config.GATE_WORKSPACE_ROOTS)
 
 
+def _workspace_repos(project_root):
+    """Names of the git repositories directly under a workspace root: a lesson naming one is about it."""
+    d = _project_dir(project_root)
+    try:
+        return {c.name for c in d.iterdir() if c.is_dir() and (c / ".git").exists() and len(c.name) >= 4}
+    except OSError:
+        return set()
+
+
 def _repo_name(project_root):
     # a workspace root is not a repo: its name in a skill is no leak; a project's name is
     d = _project_dir(project_root)
@@ -249,6 +258,11 @@ def check_change(intent, baseline, body, project_root=None, base_dir=None):
         findings.discard("global_repo_agnostic")
     if findings:
         return "invalid:" + ",".join(sorted(findings))
+    if _workspace(project_root):  # from a workspace root: a lesson about one of its repos belongs to that repo
+        named = {r for r in _workspace_repos(project_root)
+                 if re.search(rf"(?<![\w-]){re.escape(r)}(?![\w-])", added, re.I)}
+        if named:
+            return "project_specific:" + ",".join(sorted(named))
     restrictions_lost = _contexts(baseline, _restriction) - _contexts(body, _restriction)
     # fail closed on structure: with any authority or restriction line in the skill, a change that touches
     # a heading, an underline or a fence is not judged by a parser that might be fooled; it waits

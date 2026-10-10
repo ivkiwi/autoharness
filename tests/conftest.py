@@ -46,6 +46,7 @@ def _private_gate_and_flags(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(config, "GATE_DIR", gate / "skill-gate")
     monkeypatch.setattr(config, "CANON_ROOT", gate / "agents")
     monkeypatch.setattr(config, "HOST_SKILL_ROOTS", [gate / "claude-skills", gate / "codex-skills"])
+    monkeypatch.setattr(config, "PROJECTION_ROOTS", [gate / "claude-skills"])
     monkeypatch.setattr(config, "HARNESS", "claude")
     monkeypatch.setattr(layer, "HARNESS", "claude", raising=False)  # the roots side of the same switch
     monkeypatch.setattr(config, "PROPOSE_ONLY", False)
