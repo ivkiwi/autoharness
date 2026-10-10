@@ -38,6 +38,18 @@ AUTHORITY = [re.compile(p, re.I) for p in (
     r"\b(token|password|secret|api[\s_-]?key|credential)s?\b",
     r"\b(agents\.md|claude\.md|system\s+prompt|identity|persona)\b",
 )]
+# a new skill that talks about approvals at all waits for a later phase: phrasing tricks around "approval"
+# ("skip **approval**", "do not request approval") are endless, the topic is not
+APPROVAL_TOPIC = re.compile(r"\b(approv\w*|confirm\w*|permission\w*|consent\w*|sign[\s-]?off|authori[sz]\w*)\b",
+                            re.I)
+_MARKUP = re.compile(r"[*_`~]+")
+
+
+def _plain(text):
+    """Markdown emphasis and code marks removed, so `**approval**` reads as approval to every pattern."""
+    return _MARKUP.sub("", text)
+
+
 # a removed line that held a restriction weakens the skill even when nothing new is added
 RESTRICTION = re.compile(r"\b(ask|confirm\w*|approv\w*|permission|consent|never|must not|do not|don'?t|"
                          r"only (after|if|when)|before)\b", re.I)
@@ -224,7 +236,7 @@ def check_change(intent, baseline, body, project_root=None, base_dir=None):
     with tempfile.TemporaryDirectory() as alone:
         verdict = validate.validate({**intent, "level": "global"}, body, target_is_agent_created=True,
                                     repo_name=repo, base_dir=Path(base_dir) if base_dir else Path(alone))
-    added, removed = _changed(baseline, body)
+    added, removed = (_plain(x) for x in _changed(baseline, body))
     findings = {f[0] for f in verdict["findings"]}
     # canon lives on this host: paths a skill already carries stay; only a change may not add new ones
     if "global_repo_agnostic" in findings and not _host_specific(added, repo):
@@ -238,6 +250,8 @@ def check_change(intent, baseline, body, project_root=None, base_dir=None):
     modifies = bool(baseline)
     sensitive = modifies and any(_authority(x) or RESTRICTION.search(x) for x in (baseline + "\n" + body).splitlines())
     restructured = any(_STRUCTURAL.match(x) for x in (added + "\n" + removed).splitlines() if x.strip())
+    if not modifies and APPROVAL_TOPIC.search(added):
+        return "authority"
     if skills_guard.scan(body) or any(p.search(added) or p.search(removed) for p in AUTHORITY) \
             or RESTRICTION.search(removed) or restrictions_lost or (sensitive and restructured) \
             or _contexts(baseline, _authority) != _contexts(body, _authority):
