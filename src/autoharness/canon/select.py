@@ -112,6 +112,8 @@ def classify(row):
     # level, and a harness that does not manage the canon root cannot resolve one (unresolved: None)
     modify = action != "create"
     level = intent.get("level") or (verdict.get("level") if modify else None)
+    if level == "project" and _workspace(row.get("project_root")):
+        level = "global"  # a workspace root's project layer is nobody's project
     if level != "global" and not (modify and level is None):
         return "out_of_phase", "scope"  # project skills are a later phase
     if not verdict.get("ok"):
@@ -151,6 +153,25 @@ _SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 # any line that can shape sections: a heading, an underline, a fence. Deliberately over-inclusive.
 _STRUCTURAL = re.compile(r"^\s{0,3}(#|=+\s*$|-+\s*$|`{3,}|~{3,})")
+
+
+def _project_dir(project_root):
+    """The project a layer root belongs to: <repo>/.claude or <repo>/.codex -> <repo>."""
+    if not project_root:
+        return None
+    p = Path(project_root).expanduser()
+    return p.parent if p.name in (".claude", ".codex") else p
+
+
+def _workspace(project_root):
+    d = _project_dir(project_root)
+    return d is not None and any(d.resolve() == w.resolve() for w in config.GATE_WORKSPACE_ROOTS)
+
+
+def _repo_name(project_root):
+    # a workspace root is not a repo: its name in a skill is no leak; a project's name is
+    d = _project_dir(project_root)
+    return None if d is None or _workspace(project_root) else d.name
 
 
 def _contexts(text, pattern):
@@ -198,7 +219,7 @@ def check_change(intent, baseline, body, project_root=None, base_dir=None):
     """None, or why this change cannot go through phase 1: the promoter's full static validation of the
     final body as a global skill against the tree it will ship with (base_dir; a create ships alone),
     the guard, and the authority rules on what is added and removed."""
-    repo = Path(project_root).name if project_root else None
+    repo = _repo_name(project_root)
     with tempfile.TemporaryDirectory() as alone:
         verdict = validate.validate({**intent, "level": "global"}, body, target_is_agent_created=True,
                                     repo_name=repo, base_dir=Path(base_dir) if base_dir else Path(alone))

@@ -150,3 +150,7 @@ GATE_DAILY_CALLS = _int_env("AUTOHARNESS_GATE_DAILY_CALLS", 6)  # one candidate 
 GATE_CALL_TIMEOUT_S = _int_env("AUTOHARNESS_GATE_CALL_TIMEOUT_S", 600)
 GATE_MAX_ATTEMPTS = _int_env("AUTOHARNESS_GATE_MAX_ATTEMPTS", 3)
 GATE_DAILY_CANDIDATES = _int_env("AUTOHARNESS_GATE_DAILY_CANDIDATES", 1)  # consensus: at most one new candidate a day
+# folders that hold projects but are not one (a workspace root like ~/Projects): the project layer a
+# harness keeps there is everyone's, so the gate treats lessons routed to it as global candidates
+GATE_WORKSPACE_ROOTS = [Path(p).expanduser() for p in
+                        os.environ.get("AUTOHARNESS_GATE_WORKSPACE_ROOTS", "").split(os.pathsep) if p]

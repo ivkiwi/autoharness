@@ -50,3 +50,4 @@ def _private_gate_and_flags(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(layer, "HARNESS", "claude", raising=False)  # the roots side of the same switch
     monkeypatch.setattr(config, "PROPOSE_ONLY", False)
     monkeypatch.setattr(config, "DISABLE_GLOBAL", False)
+    monkeypatch.setattr(config, "GATE_WORKSPACE_ROOTS", [])

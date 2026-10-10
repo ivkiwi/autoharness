@@ -480,3 +480,32 @@ def test_a_create_without_global_stays_out():
     del row["intent"]["level"]
     row["verdict"] = {"ok": True, "level": "global", "findings": []}
     assert select.classify(row) == ("out_of_phase", "scope")
+
+
+def test_a_project_lesson_from_a_workspace_root_is_a_global_candidate(tmp_path, monkeypatch):
+    workspace = tmp_path / "Projects"
+    workspace.mkdir()
+    monkeypatch.setattr(config, "GATE_WORKSPACE_ROOTS", [workspace])
+    row = _row(level="project")
+    row["project_root"] = str(workspace / ".claude")
+    assert select.classify(row)[0] == "eligible"
+    row["project_root"] = str(workspace / "some-repo" / ".claude")  # a real project below it stays out
+    assert select.classify(row) == ("out_of_phase", "scope")
+
+
+def test_the_repo_name_check_uses_the_project_not_its_layer_dir():
+    row = _row(body=BODY.format(name="foo") + "Keep .claude/skills tidy.\n")
+    row["project_root"] = "/somewhere/acme/.claude"
+    assert select.classify(row)[0] == "eligible"  # ".claude" is not the repo name
+    row = _row(body=BODY.format(name="foo") + "Run the acme release script.\n")
+    row["project_root"] = "/somewhere/acme/.claude"
+    assert select.classify(row) == ("out_of_phase", "invalid:global_repo_agnostic")
+
+
+def test_the_home_folder_is_a_workspace_root_too(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(config, "GATE_WORKSPACE_ROOTS", [tmp_path / "Projects", home])
+    row = _row(level="project")
+    row["project_root"] = str(home / ".claude")  # a session started in ~ keeps its project layer at ~/.claude
+    assert select.classify(row)[0] == "eligible"
