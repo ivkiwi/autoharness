@@ -182,6 +182,13 @@ def test_referenced_py_escaping_ref_is_not_read(tmp_path):
     finally:
         secret.unlink()
 
+def test_url_to_a_python_file_is_not_a_path_escape(tmp_path):
+    body = ("---\nname: foo\ndescription: d\n---\n"
+            "Fetch https://raw.githubusercontent.com/org/repo/main/tool.py before running.\n")
+    msgs = [m for _, m in validate.validate(GOOD_INTENT, body, base_dir=tmp_path)["findings"]]
+    assert not any("escapes the skill directory" in m for m in msgs)
+
+
 def test_referenced_subfile_escaping_ref_is_not_probed(tmp_path):
     # an escaping ref aimed at nothing outside must not be probed at all:
     # vulnerable code reports it as "neither carried in intent nor live"
