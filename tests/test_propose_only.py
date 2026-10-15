@@ -6,7 +6,15 @@ import pytest
 
 from autoharness import config
 from autoharness.hook import on_session_start, promoter
-from autoharness.lib import counters, intent_queue, layer, metrics, sidecar, skill_store
+from autoharness.lib import (
+    counters,
+    intent_queue,
+    layer,
+    lock,
+    metrics,
+    sidecar,
+    skill_store,
+)
 
 BODY = "---\nname: foo\ndescription: Use when formatting a date.\n---\nUse strftime.\n"
 
@@ -50,6 +58,36 @@ def test_valid_intent_is_proposed_not_landed(roots, propose_only):
     last = json.loads((layer.state_dir(layer.PROJECT, proot) / "last_run.json").read_text())
     assert (last["landed"], last["proposed"], last["rejected"]) == (0, 1, 0)
 
+
+
+def test_a_read_only_global_root_still_gets_proposals(roots, propose_only):
+    # the global promote lock is a write into the global root; nothing lands here, so it is not taken
+    groot = roots[layer.GLOBAL]
+    groot.mkdir()
+    groot.chmod(0o555)
+    try:
+        intent_queue.append("run1", {**_create(), "level": "global"}, roots[layer.PROJECT])
+        [verdict] = promoter.drain("run1", roots=roots)
+        assert list(groot.iterdir()) == []
+    finally:
+        groot.chmod(0o755)
+    assert verdict["ok"] and verdict["proposed"], verdict
+    assert _proposals(roots, "run1")[0]["verdict"]["proposed"]
+
+
+def test_propose_only_still_takes_the_global_lock_where_it_can(roots, propose_only, monkeypatch):
+    # validation reads the library; without the lock another session's archive could move a skill mid-read
+    taken = []
+    real = lock.file_lock
+
+    def spy(path):
+        taken.append(os.path.basename(path))
+        return real(path)
+
+    monkeypatch.setattr(lock, "file_lock", spy)
+    intent_queue.append("run1", {**_create(), "level": "global"}, roots[layer.PROJECT])
+    [verdict] = promoter.drain("run1", roots=roots)
+    assert verdict["proposed"] and "promote.lock" in taken
 
 def test_rejected_intent_is_kept_whole(roots, propose_only):
     proot = roots[layer.PROJECT]

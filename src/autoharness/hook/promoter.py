@@ -26,6 +26,7 @@ validating admission (validate in-flight, persist only on allow) + POSIX atomic-
 
 ponytail: one drain per project root is now serialized through lib.lock (see drain). LED watermark still pends true values from CAP; the create anchor reads the layer request counter at land time (probation is fiction without a true anchor). Whole-run clear, the tiny crash window (between land and clear) may re-append the LED — per-item idempotent watermark pending the intent-queue granularity being finalized (validate-store open).
 """
+import contextlib
 import errno
 import hashlib
 import json
@@ -175,6 +176,10 @@ def _land(action, intent, body, level, name, root):
     ledger.append(level, name, _led(intent, evidence_ref), root)
 
 
+# the global root refuses the lock file itself: read-only mount, or a root the user may not write
+_UNWRITABLE = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
 def promote(intent, *, roots=None, repo_name=None):
     roots = roots or {}
     action = intent.get("action")
@@ -206,12 +211,19 @@ def promote(intent, *, roots=None, repo_name=None):
         if other:
             return _reject(action, level, [("routing", f"{name!r} is already live in the {other[0]} layer")])
 
-    if level == layer.GLOBAL:
-        # Per-project drain locks cannot coordinate another project's edits to
-        # the same global library. Keep local-only promotions independent.
-        with lock.file_lock(layer.state_dir(level, roots.get(level)) / "promote.lock"):
-            return _promote_resolved(intent, action, name, level, roots, repo_name)
-    return _promote_resolved(intent, action, name, level, roots, repo_name)
+    if level != layer.GLOBAL:
+        return _promote_resolved(intent, action, name, level, roots, repo_name)
+    # Per-project drain locks cannot coordinate another project's edits to
+    # the same global library. Keep local-only promotions independent.
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(lock.file_lock(layer.state_dir(level, roots.get(level)) / "promote.lock"))
+        except OSError as exc:
+            # propose-only lands nothing, so a global root it cannot write must not turn a proposal into
+            # a crash; wherever the lock can be taken it still is, so reads stay ordered after a writer
+            if not (config.PROPOSE_ONLY and exc.errno in _UNWRITABLE):
+                raise
+        return _promote_resolved(intent, action, name, level, roots, repo_name)
 
 
 def _promote_resolved(intent, action, name, level, roots, repo_name):
