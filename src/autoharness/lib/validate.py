@@ -29,7 +29,7 @@ _FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n)?", re.DOTALL)
 _PLACEHOLDER = re.compile(r"\b(TODO|FIXME|XXX):|<(?:TODO|FIXME|XXX|TBD|PLACEHOLDER|REPLACE[_ ]?ME|INSERT[_ ]?HERE|FILL[_ ]?IN)>")
 _ABS_PATH = re.compile(r"(?:/home/|/Users/|/root/)[^\s`)\]]+|[A-Za-z]:\\[^\s`)\]]+")
 _PY_REF = re.compile(r"[\w./-]+\.py")
-_SUBFILE_REF = re.compile(r"\b(?:{})/[A-Za-z0-9._/-]+".format("|".join(layer.SUBFILE_DIRS)))
+_SUBFILE_REF = re.compile(r"(?<![A-Za-z0-9_./-])(?:\./)?(?:{})/[A-Za-z0-9._/-]+".format("|".join(layer.SUBFILE_DIRS)))
 _MODIFY = ("update", "patch", "remove_file", "delete")
 # description-as-trigger proxy: a firing description names WHEN to use it ("use when …") or lists a
 # literal phrase the user would type (quoted). A bare topic-label has neither and never fires.
@@ -41,18 +41,81 @@ def _has_cue(text):
     return bool(_WHEN.search(text) or _QUOTED_PHRASE.search(text))
 
 
+def _block_scalar(lines, start, parent_indent, header):
+    """Decode a flat string field's YAML literal/folded scalar, not a general YAML document."""
+    modifiers = header.split("#", 1)[0].strip()[1:]
+    explicit = next((int(ch) for ch in modifiers if ch.isdigit()), None)
+    end = start
+    while end < len(lines) and (not lines[end].strip(" ")
+                                or len(lines[end]) - len(lines[end].lstrip(" ")) > parent_indent):
+        end += 1
+    raw = lines[start:end]
+    first = next((i for i, line in enumerate(raw) if line.strip(" ")), None)
+    indent = parent_indent + explicit if explicit else (
+        len(raw[first]) - len(raw[first].lstrip(" ")) if first is not None else max([parent_indent + 1, *(len(line) for line in raw)])
+    )
+    if explicit is None and first is not None and any(len(line) > indent for line in raw[:first]):
+        raise ValueError("leading empty scalar line exceeds detected indentation")
+    for offset, line in enumerate(raw):
+        if (line.lstrip(" ").startswith("#")
+                and len(line) - len(line.lstrip(" ")) < indent):
+            raw, end = raw[:offset], start + offset
+            break  # a dedented trailing comment is outside the scalar
+    content = []
+    for line in raw:
+        if line.strip(" ") and len(line) - len(line.lstrip(" ")) < indent:
+            raise ValueError("block scalar line is less indented than its content")
+        content.append(line[indent:] if len(line) >= indent else "")
+    chunks, index = [], 0
+    while index < len(content):
+        line = content[index]
+        if not line:
+            chunks.append("\n")
+            index += 1
+            continue
+        chunks.append(line)
+        following = index + 1
+        while following < len(content) and not content[following]:
+            following += 1
+        if (header[0] == ">" and following < len(content)
+                and not line.startswith((" ", "\t"))
+                and not content[following].startswith((" ", "\t"))):
+            chunks.append(" " if following == index + 1 else "\n" * (following - index - 1))
+        else:
+            chunks.append("\n" * (following - index))
+        index = following
+    value = "".join(chunks)
+    if "-" in modifiers:
+        value = value.rstrip("\n")
+    elif "+" not in modifiers:
+        value = value.rstrip("\n")
+        if value:
+            value += "\n"
+    return value, end
+
+
 def _frontmatter(body):
+    """Read flat string fields: plain/quoted values and YAML literal/folded block scalars."""
     m = _FRONTMATTER.match(body)
     if not m:
         return None
     fm = {}
-    for line in m.group(1).splitlines():
+    lines = (m.group(1) + "\n").splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
         s = line.strip()
         if not s or s.startswith("#") or ":" not in line:
             continue
         key, value = line.split(":", 1)
         v = value.strip()
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+        if re.fullmatch(r"[>|](?:[1-9][-+]?|[-+][1-9]?)?(?:[ \t]+#.*)?", v):
+            try:
+                v, index = _block_scalar(lines, index, len(line) - len(line.lstrip(" ")), v)
+            except ValueError:
+                return None
+        elif len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
             v = v[1:-1]
         fm[key.strip()] = v
     return fm
@@ -126,6 +189,46 @@ def check_files(files, *, base_dir=None, creating=False):
     return findings
 
 
+def _backtick_spans(text):
+    """Balanced backtick code spans; an unmatched/escaped opener is ordinary prose."""
+    ticks = list(re.finditer(r"`+", text))
+    spans, index = [], 0
+    while index < len(ticks):
+        opener = ticks[index]
+        prefix = text[:opener.start()]
+        if (len(prefix) - len(prefix.rstrip("\\"))) % 2:
+            index += 1
+            continue
+        closer = next((i for i in range(index + 1, len(ticks))
+                       if ticks[i].group() == opener.group()), None)
+        if closer is None:
+            index += 1
+            continue
+        spans.append((opener.end(), ticks[closer].start()))
+        index = closer + 1
+    return spans
+
+
+def subfile_references(body, *, base_dir, files=None):
+    """Resolve terminal prose punctuation against contextual paths for all consumers."""
+    base = base_dir.resolve()
+    code_spans, seen_refs = _backtick_spans(body), set()
+    for match in _SUBFILE_REF.finditer(body):
+        ref = match.group().removeprefix("./")
+        in_code = any(start <= match.start() < end for start, end in code_spans)
+        if not (base_dir / ref).resolve().is_relative_to(base):
+            continue
+        if not in_code and ref.endswith(".") and ref not in (files or {}) and not (base_dir / ref).is_file():
+            plain = ref.rstrip(".")
+            candidate = base_dir / plain
+            if candidate.resolve().is_relative_to(base) \
+                    and (plain in (files or {}) or candidate.is_file()):
+                ref = plain
+        if ref not in seen_refs:
+            seen_refs.add(ref)
+            yield ref
+
+
 def _structure(body, base_dir, files=None):
     findings = []
     fm = _frontmatter(body)
@@ -154,11 +257,8 @@ def _structure(body, base_dir, files=None):
                     ast.parse(source if isinstance(source, str) else f.read_text(encoding="utf-8"))
                 except SyntaxError as exc:
                     findings.append(("structure", f"referenced {ref} has syntax error: {exc}"))
-        for ref in set(_SUBFILE_REF.findall(body)):
-            # escaping refs are skipped silently: writes are gated by the
-            # promoter's landing check, validation must not probe outside
-            if (base_dir / ref).resolve().is_relative_to(base) \
-                    and ref not in (files or {}) and not (base_dir / ref).is_file():
+        for ref in subfile_references(body, base_dir=base_dir, files=files):
+            if ref not in (files or {}) and not (base_dir / ref).is_file():
                 findings.append(("structure", f"referenced {ref} neither carried in intent nor live"))
     for rel in files or {}:
         if isinstance(rel, str) and rel not in body:

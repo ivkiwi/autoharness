@@ -29,7 +29,6 @@ ponytail: one drain per project root is now serialized through lib.lock (see dra
 import errno
 import hashlib
 import json
-import re
 
 from autoharness import config
 from autoharness.canon import queue as canon_queue
@@ -106,10 +105,11 @@ def _inside(level, name, rel, root):
 
 def _removable(level, name, rel, root):
     p = _inside(level, name, rel, root)
+    sdir = layer.symbol_dir(level, name, root).resolve()
     live = skill_store.read_body(level, name, root) or ""
-    # Use word-boundary check so scripts/run.py does not match scripts/run.py.bak
-    _ref = re.compile(r"(?<![A-Za-z0-9_./-])" + re.escape(rel) + r"(?![A-Za-z0-9_./-])")
-    if _ref.search(live):
+    # Use the same contextual pointer interpretation as admission. Mark the
+    # requested path known even if it is already absent: its pointer still needs patching out.
+    if rel in validate.subfile_references(live, base_dir=sdir, files={rel: ""}):
         raise ValueError(f"{rel} is still referenced by the live SKILL.md (patch the pointer out first)")
     return p
 
@@ -206,6 +206,15 @@ def promote(intent, *, roots=None, repo_name=None):
         if other:
             return _reject(action, level, [("routing", f"{name!r} is already live in the {other[0]} layer")])
 
+    if level == layer.GLOBAL:
+        # Per-project drain locks cannot coordinate another project's edits to
+        # the same global library. Keep local-only promotions independent.
+        with lock.file_lock(layer.state_dir(level, roots.get(level)) / "promote.lock"):
+            return _promote_resolved(intent, action, name, level, roots, repo_name)
+    return _promote_resolved(intent, action, name, level, roots, repo_name)
+
+
+def _promote_resolved(intent, action, name, level, roots, repo_name):
     root = roots.get(level)
     try:
         body = _shape(intent, level, root)
