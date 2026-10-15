@@ -129,6 +129,13 @@ def test_dense_matches_do_not_make_redact_quadratic():
     assert "a@b.co" not in out
 
 
+def test_a_card_right_after_a_phone_number_is_still_found():
+    # the phone and the card read as one 20-digit run whose first 16 digits fail luhn; finditer resumed
+    # after that rejected match and never tried the card on its own
+    out = redact.redact("call 415-555-0132 4111 1111 1111 1111 now")
+    assert out.startswith("call [REDACTED:pii:us_phone] [REDACTED:pii:credit_card]") and "4111" not in out
+
+
 def test_unknown_validator_name_fails_loud_at_rule_load():
     import tempfile
 

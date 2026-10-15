@@ -80,6 +80,21 @@ def _raw(text, key):
     return raw
 
 
+def _kept(rx, validator, text):
+    """Matches of *rx* in *text* that the rule's validator keeps. A rejected match is retried one character
+    on: finditer resumes after it, so a card number right after a phone number was never tried alone."""
+    if validator is None:
+        yield from rx.finditer(text)
+        return
+    pos = 0
+    while (match := rx.search(text, pos)) is not None:
+        if validator(match.group(0)):
+            yield match
+            pos = max(match.end(), match.start() + 1)
+        else:
+            pos = match.start() + 1
+
+
 def _spans(text, key):
     """Disjoint [start, end, rank, token] spans covering every rule match in *text*, in order. A match
     that overlaps another extends its span instead of being dropped: a key block whose Comment line held
@@ -88,8 +103,8 @@ def _spans(text, key):
     found = sorted(
         (match.start(), match.end(), rank, _token(category, name))
         for rank, (category, name, rx, validator) in enumerate(_rules(key))
-        for match in rx.finditer(text)
-        if (validator is None or validator(match.group(0))) and raw(match)
+        for match in _kept(rx, validator, text)
+        if raw(match)
     )
     spans = []
     for start, end, rank, token in found:
@@ -123,5 +138,5 @@ def secret_hits(text, rules_path=None):
         name
         for category, name, rx, validator in _rules(key)
         if category == "secret"
-        and any((validator is None or validator(match.group(0))) and raw(match) for match in rx.finditer(text))
+        and any(raw(match) for match in _kept(rx, validator, text))
     ]
