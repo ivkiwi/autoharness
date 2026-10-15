@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from autoharness.lib import redact
 
 
@@ -69,6 +71,14 @@ def test_clipped_key_body_goes_whatever_its_lines_look_like():
             assert leak not in out, f"leaked: {leak}"
         assert out.endswith("\nassistant: next record")
 
+
+
+@pytest.mark.parametrize("eol", ["\r\n", "\r\r\n", "\r"])
+def test_clipped_key_body_goes_whatever_its_line_endings(eol):
+    # openssl reads a PEM with `\r\r\n` endings; a fallback that stopped at the first `\r` kept the body
+    out = redact.redact("user: " + eol.join([_BEGIN, *_BODY]) + "\nassistant: next record")
+    _no_key_left(out)
+    assert out.endswith("\nassistant: next record")
 
 def test_pgp_private_key_block_is_redacted_whole_and_clipped():
     begin, end = "-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----END PGP PRIVATE KEY BLOCK-----"
