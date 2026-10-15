@@ -51,28 +51,31 @@ def test_private_key_block_clipped_before_its_end_line():
     out = redact.redact(clipped)
     _no_key_left(out)
     assert '{"next": "record"}' in out
-    raw = "\n".join([_BEGIN, *_BODY]) + "\nthe prose after it stays"
-    out = redact.redact(raw)
+    digest = "user: " + "\n".join([_BEGIN, *_BODY]) + "\nthe rest of this record goes too\nassistant: next record"
+    out = redact.redact(digest)
     _no_key_left(out)
-    assert "the prose after it stays" in out
+    assert "the rest of this record" not in out and out.endswith("\nassistant: next record")
 
 
-def test_clipped_key_with_indented_or_padded_body_lines():
-    # pasted inside a YAML block scalar, or with trailing spaces, and clipped before END (digest)
-    indented = "  key: |\n    " + "\n    ".join([_BEGIN, *_BODY]) + "\n  other: value"
-    padded = "\n".join([_BEGIN] + [ln + " " for ln in _BODY]) + "\nthe prose after it stays"
-    for raw, kept in [(indented, "other: value"), (padded, "the prose after it stays")]:
-        out = redact.redact(raw)
-        _no_key_left(out)
-        assert kept in out
+def test_clipped_key_body_goes_whatever_its_lines_look_like():
+    # indented (a YAML block scalar), padded, or with spaces inside the base64 (openssl reads that):
+    # the body of a clipped key is the rest of its record, not lines that happen to look like base64
+    chunks = [ln[i:i + 16] for ln in _BODY for i in range(0, len(ln), 16)]
+    layouts = ["\n    ".join([_BEGIN, *_BODY]), "\n".join([_BEGIN] + [ln + " " for ln in _BODY]),
+               "\n".join([_BEGIN] + [" ".join(ln[i:i + 16] for i in range(0, len(ln), 16)) for ln in _BODY])]
+    for layout in layouts:
+        out = redact.redact("user: " + layout + "\nassistant: next record")
+        for leak in [_BEGIN, *chunks]:
+            assert leak not in out, f"leaked: {leak}"
+        assert out.endswith("\nassistant: next record")
 
 
 def test_pgp_private_key_block_is_redacted_whole_and_clipped():
     begin, end = "-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----END PGP PRIVATE KEY BLOCK-----"
     body = ["Version: GnuPG v2", "", "lQdGBGYAAAABEADKxAbCdEfGh", "=abcd"]
-    after = "\nthe prose after it stays"
-    for raw in ["\n".join([begin, *body, end]) + after, "\n".join([begin, *body]) + after]:
-        out = redact.redact(raw)
+    for raw, after in [("\n".join([begin, *body, end]), "\nthe prose after it stays"),
+                       ("\n".join([begin, *body]), "\nassistant: next record")]:
+        out = redact.redact(raw + after)
         for leak in [begin, "GnuPG", "lQdGBGYAAAABEADKxAbCdEfGh", "=abcd", end]:
             assert leak not in out, f"leaked: {leak}"
         assert out.endswith(after)
@@ -105,11 +108,11 @@ def test_key_clipped_by_the_digest_record_cap():
 def test_clipped_legacy_encrypted_key_redacts_its_headers_and_body():
     raw = "\n".join(["-----BEGIN RSA PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED",
                      "DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF", "", *_BODY,
-                     "prose after it stays"])
+                     "assistant: next record"])
     out = redact.redact(raw)
     for leak in ["Proc-Type", "DEK-Info", *_BODY]:
         assert leak not in out, f"leaked: {leak}"
-    assert "prose after it stays" in out
+    assert out.endswith("\nassistant: next record")
 
 
 def test_benign_text_unchanged():
@@ -224,6 +227,12 @@ def test_a_card_right_after_a_phone_number_is_still_found():
     # after that rejected match and never tried the card on its own
     out = redact.redact("call 415-555-0132 4111 1111 1111 1111 now")
     assert out.startswith("call [REDACTED:pii:us_phone] [REDACTED:pii:credit_card]") and "4111" not in out
+
+
+def test_a_window_that_passes_luhn_by_chance_does_not_hide_the_rest_of_a_card():
+    # `6026 1064 4111 1111` passes luhn; resuming after it left the real card's last eight digits raw
+    out = redact.redact("6346 7486 6026 1064 4111 1111 1111 1111")
+    assert "1111" not in out and out.endswith("[REDACTED:pii:credit_card]")
 
 
 def test_unknown_validator_name_fails_loud_at_rule_load():

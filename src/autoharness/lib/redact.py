@@ -81,8 +81,10 @@ def _raw(text, key):
 
 
 def _kept(rx, validator, text):
-    """Matches of *rx* in *text* that the rule's validator keeps. A rejected match is retried one character
-    on: finditer resumes after it, so a card number right after a phone number was never tried alone."""
+    """Matches of *rx* in *text* that the rule's validator keeps, overlapping ones included: the search
+    resumes one character on, not after the match. finditer skipped a card right after a phone number
+    (one digit run whose first window fails luhn), and resuming after a kept window that happens to pass
+    luhn would skip the rest of a real card it overlaps; overlapping kept matches merge into one span."""
     if validator is None:
         yield from rx.finditer(text)
         return
@@ -90,9 +92,7 @@ def _kept(rx, validator, text):
     while (match := rx.search(text, pos)) is not None:
         if validator(match.group(0)):
             yield match
-            pos = max(match.end(), match.start() + 1)
-        else:
-            pos = match.start() + 1
+        pos = match.start() + 1
 
 
 def _spans(text, key):
