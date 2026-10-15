@@ -9,7 +9,8 @@ credit_card), keeping sequences that fail the check in the stream as evidence.
 Rules are collected against the original text and applied in one pass, so no rule ever sees another
 rule's placeholder: the placeholder is the only record of what was removed, and a sequential sweep
 let a later rule (api_key_assignment) match the `secret:<name>` inside an earlier rule's placeholder
-and rewrite it as a nested, generic one.
+and rewrite it as a nested, generic one. Overlapping matches merge into one span named by the earliest
+rule in the file: no match is ever dropped, or the part of it no other rule covered would stay raw.
 """
 import functools
 import re
@@ -57,25 +58,33 @@ def _token(category, name):
     return f"[REDACTED:{category}:{name}]"
 
 
-def _overlaps(spans, start, end):
-    return any(start < span[1] and span[0] < end for span in spans)
+def _spans(text, key):
+    """Disjoint [start, end, rank, token] spans covering every rule match in *text*, in order. A match
+    that overlaps another extends its span instead of being dropped: a key block whose Comment line held
+    an AWS key id kept its whole body when the block lost to the earlier aws rule."""
+    found = sorted(
+        (match.start(), match.end(), rank, _token(category, name))
+        for rank, (category, name, rx, validator) in enumerate(_rules(key))
+        for match in rx.finditer(text)
+        if validator is None or validator(match.group(0))
+    )
+    spans = []
+    for start, end, rank, token in found:
+        if spans and start < spans[-1][1]:
+            last = spans[-1]
+            last[1] = max(last[1], end)
+            if rank < last[2]:
+                last[2:] = [rank, token]
+        else:
+            spans.append([start, end, rank, token])
+    return spans
 
 
 def redact(text, rules_path=None):
-    spans = []
     key = str(rules_path) if rules_path else str(config.REDACTION_RULES)
-    for category, name, rx, validator in _rules(key):
-        for match in rx.finditer(text):
-            if validator is not None and not validator(match.group(0)):
-                continue
-            if _overlaps(spans, match.start(), match.end()):
-                continue
-            spans.append((match.start(), match.end(), _token(category, name)))
-    spans.sort(key=lambda span: span[0])
-
     out = []
     cursor = 0
-    for start, end, token in spans:
+    for start, end, _, token in _spans(text, key):
         out.append(text[cursor:start])
         out.append(token)
         cursor = end

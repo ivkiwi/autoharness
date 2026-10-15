@@ -1,3 +1,5 @@
+import time
+
 from autoharness.lib import redact
 
 
@@ -66,11 +68,29 @@ def test_each_rule_reports_itself_and_placeholders_are_never_rematched():
         assert "[REDACTED:[REDACTED:" not in out, f"nested placeholder for {raw!r}"
 
 
-def test_overlapping_rules_keep_the_earlier_rule_in_the_file():
+def test_overlapping_matches_merge_and_the_earlier_rule_names_them():
     # github_token is ordered before api_key_assignment; the wider assignment match
-    # overlaps it, so the narrower, earlier rule owns the span.
+    # overlaps it, so the narrower, earlier rule names the merged span.
     raw = "token = ghp_abcdefghij0123456789"
-    assert redact.redact(raw) == "token = [REDACTED:secret:github_token]"
+    assert redact.redact(raw) == "[REDACTED:secret:github_token]"
+
+
+def test_a_match_inside_a_key_block_does_not_leave_the_block_raw():
+    # the aws rule comes first and takes the id; dropping the overlapping key block kept its body
+    raw = "\n".join(["-----BEGIN RSA PRIVATE KEY-----", "Comment: AKIAABCDEFGHIJKLMNOP",
+                     "MIIEowIBAAKCAQEAyF2t", "-----END RSA PRIVATE KEY-----"]) + "\nafter"
+    out = redact.redact(raw)
+    for leak in ["BEGIN RSA", "AKIAABCDEFGHIJKLMNOP", "MIIEowIBAAKCAQEAyF2t", "END RSA"]:
+        assert leak not in out, f"leaked: {leak}"
+    assert out == "[REDACTED:secret:aws_access_key_id]\nafter"
+
+
+def test_dense_matches_do_not_make_redact_quadratic():
+    # 28k matches in a 200 KB window (the capture cap): checking each against every span took ~8 s
+    started = time.perf_counter()
+    out = redact.redact("a@b.co " * 28_000)
+    assert time.perf_counter() - started < 2
+    assert "a@b.co" not in out
 
 
 def test_unknown_validator_name_fails_loud_at_rule_load():
