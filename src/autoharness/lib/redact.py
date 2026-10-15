@@ -11,7 +11,10 @@ rule's placeholder: the placeholder is the only record of what was removed, and 
 let a later rule (api_key_assignment) match the `secret:<name>` inside an earlier rule's placeholder
 and rewrite it as a nested, generic one. Overlapping matches merge into one span named by the earliest
 rule in the file: no match is ever dropped, or the part of it no other rule covered would stay raw.
+Placeholders already in the input are not rematched: redacted text is fed back in (capture redacts the
+window, the promoter redacts the evidence quoted from it again).
 """
+import bisect
 import functools
 import re
 import tomllib
@@ -58,15 +61,35 @@ def _token(category, name):
     return f"[REDACTED:{category}:{name}]"
 
 
+@functools.lru_cache(maxsize=4)
+def _placeholder(key):
+    # only this rule set's own tokens: a made-up `[REDACTED:secret:<a real key>]` is still raw text
+    return re.compile("|".join(re.escape(_token(category, name)) for category, name, _, _ in _rules(key)))
+
+
+def _raw(text, key):
+    """Predicate: is a match raw text, not lying wholly inside one of this rule set's placeholders?
+    A match that reaches outside one (a key block around a redacted Comment line) is raw."""
+    held = [match.span() for match in _placeholder(key).finditer(text)]
+    starts = [start for start, _ in held]
+
+    def raw(match):
+        i = bisect.bisect_right(starts, match.start()) - 1  # placeholders never overlap: one candidate
+        return i < 0 or match.end() > held[i][1]
+
+    return raw
+
+
 def _spans(text, key):
     """Disjoint [start, end, rank, token] spans covering every rule match in *text*, in order. A match
     that overlaps another extends its span instead of being dropped: a key block whose Comment line held
     an AWS key id kept its whole body when the block lost to the earlier aws rule."""
+    raw = _raw(text, key)
     found = sorted(
         (match.start(), match.end(), rank, _token(category, name))
         for rank, (category, name, rx, validator) in enumerate(_rules(key))
         for match in rx.finditer(text)
-        if validator is None or validator(match.group(0))
+        if (validator is None or validator(match.group(0))) and raw(match)
     )
     spans = []
     for start, end, rank, token in found:
@@ -95,9 +118,10 @@ def redact(text, rules_path=None):
 def secret_hits(text, rules_path=None):
     """Names of the secret rules *text* matches — a gate, not a rewrite (PII stays redact-only)."""
     key = str(rules_path) if rules_path else str(config.REDACTION_RULES)
+    raw = _raw(text, key)
     return [
         name
         for category, name, rx, validator in _rules(key)
         if category == "secret"
-        and any(validator is None or validator(match.group(0)) for match in rx.finditer(text))
+        and any((validator is None or validator(match.group(0))) and raw(match) for match in rx.finditer(text))
     ]
