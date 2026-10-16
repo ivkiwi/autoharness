@@ -294,3 +294,25 @@ def test_private_key_block_redacts_body_and_end_line():
         assert leak not in out, f"leaked: {leak}"
     assert "[REDACTED:" in out
     assert redact.secret_hits(raw) == ["private_key_block"]
+
+
+def test_quoted_key_assignments_are_redacted():
+    # JSON / Python-dict / TOML-style assignments quote the key, and inside a JSONL transcript record
+    # the quotes are backslash-escaped: the value must not survive any of those spellings.
+    secret = "sk_live_abcd1234EFGH5678ijkl"
+    for raw in (
+        f'{{"api_key": "{secret}"}}',
+        f'{{"password":"{secret}"}}',
+        f"{{'token': '{secret}'}}",
+        f'"client_secret" = "{secret}"',
+        '{"type":"user","content":"{\\"api_key\\": \\"' + secret + '\\"}"}',
+    ):
+        out = redact.redact(raw)
+        assert secret not in out, f"leaked in {raw!r}: {out!r}"
+        assert "[REDACTED:secret:api_key_assignment]" in out
+        assert redact.secret_hits(raw) == ["api_key_assignment"]
+
+
+def test_quoted_key_rule_keeps_short_values_and_prose():
+    raw = '{"token": "short"} and the "password" field is required'
+    assert redact.redact(raw) == raw
