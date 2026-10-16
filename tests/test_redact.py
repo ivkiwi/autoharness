@@ -316,3 +316,10 @@ def test_quoted_key_assignments_are_redacted():
 def test_quoted_key_rule_keeps_short_values_and_prose():
     raw = '{"token": "short"} and the "password" field is required'
     assert redact.redact(raw) == raw
+
+
+def test_fine_grained_github_pat_is_redacted():
+    pat = "github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+    raw = f"cloned with {pat} ok"
+    assert redact.redact(raw) == "cloned with [REDACTED:secret:github_token] ok"
+    assert redact.secret_hits(raw) == ["github_token"]
