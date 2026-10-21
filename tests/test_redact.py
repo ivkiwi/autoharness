@@ -323,3 +323,15 @@ def test_fine_grained_github_pat_is_redacted():
     raw = f"cloned with {pat} ok"
     assert redact.redact(raw) == "cloned with [REDACTED:secret:github_token] ok"
     assert redact.secret_hits(raw) == ["github_token"]
+
+
+def test_an_assignment_inside_a_quoted_value_keeps_its_value_redacted():
+    # the quoted-key form matched token -> "client_secret" first; the inner assignment holding the value
+    # overlaps that match and must still be found and merged into the span
+    for raw in (
+        '{"token":"client_secret=abcdefghijklmnop"}',
+        '{"token":"client_secret\\":\\"abcdefghijklmnop"}',
+    ):
+        out = redact.redact(raw)
+        assert "abcdefghijklmnop" not in out, f"leaked in {raw!r}: {out!r}"
+        assert redact.secret_hits(raw) == ["api_key_assignment"]
