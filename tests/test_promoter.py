@@ -809,3 +809,28 @@ def test_update_can_still_rewrite_an_existing_legacy_subfile(tmp_path):
     fresh = "references/" + "m" * 104 + ".md"
     bad = {**upd, "files": {fresh: "x\n"}, "body": GOOD_BODY + f"See {fresh} for the notes\n"}
     assert "files" in _families(promoter.promote(bad, roots=roots))  # a new over-long name is still refused
+
+
+def test_create_rejects_a_name_live_in_the_other_layer(tmp_path):
+    # the user's global foo plus a project create foo would leave the name ambiguous for every later
+    # update, patch, delete and load count
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)
+    assert not skill_store.exists("project", "foo", roots["project"])
+
+
+def test_create_in_the_same_layer_is_not_blocked_by_the_other_layer_check(tmp_path):
+    roots = _roots(tmp_path)
+    assert promoter.promote(_create(level="project"), roots=roots)["ok"]
+    assert promoter.promote(_create(level="project"), roots=roots)["ok"]  # crash replay stays idempotent
+
+
+def test_create_checks_the_other_layer_even_with_global_disabled(tmp_path, monkeypatch):
+    # disabling global stops writes there; flipping it back must not reveal an ambiguous name
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    monkeypatch.setattr(promoter.config, "DISABLE_GLOBAL", True)
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)

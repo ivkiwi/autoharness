@@ -119,7 +119,7 @@ def _spans(text, key):
 
 
 def redact(text, rules_path=None):
-    key = str(rules_path) if rules_path else str(config.REDACTION_RULES)
+    key = str(Path(rules_path if rules_path else config.REDACTION_RULES).resolve())
     out = []
     cursor = 0
     for start, end, _, token in _spans(text, key):
@@ -132,7 +132,7 @@ def redact(text, rules_path=None):
 
 def secret_hits(text, rules_path=None):
     """Names of the secret rules *text* matches — a gate, not a rewrite (PII stays redact-only)."""
-    key = str(rules_path) if rules_path else str(config.REDACTION_RULES)
+    key = str(Path(rules_path if rules_path else config.REDACTION_RULES).resolve())
     raw = _raw(text, key)
     return [
         name
