@@ -604,10 +604,11 @@ def test_present_category_is_not_noted(tmp_path):
     assert v["ok"] and not v.get("notes")
 
 
-def test_illegal_category_still_rejected(tmp_path):
+@pytest.mark.parametrize("bad", ["dates/iso", "my dates", "..", "-dates", "dates!"])
+def test_illegal_category_still_rejected(tmp_path, bad):
     # format stays fail-closed: a path-shaped category would break index grouping and path safety
     roots = _roots(tmp_path)
-    body = CATEGORIZED_BODY.replace("category: dates", "category: dates/iso")
+    body = CATEGORIZED_BODY.replace("category: dates", f"category: {bad}")
     v = promoter.promote(_create(body=body), roots=roots)
     assert not v["ok"] and "category" in _families(v)
     assert not skill_store.exists("project", "foo", roots["project"])
@@ -624,3 +625,53 @@ def test_run_account_carries_uncategorized_count(tmp_path):
     assert last["uncategorized"] == 1  # only the one that landed without a category
     rows = json.loads((layer.state_dir("project", proot) / "runs" / "run-cat.json").read_text())["verdicts"]
     assert {r["name"]: r.get("notes") for r in rows}["uncat"] == ["category"]
+
+
+def test_create_with_an_unusable_name_is_rejected_cleanly(tmp_path):
+    roots = _roots(tmp_path)
+    for bad in ["a" * 256, "con"]:
+        v = promoter.promote(_create(name=bad, body=GOOD_BODY.replace("name: foo", f"name: {bad}")), roots=roots)
+        assert not v["ok"] and "shape" in _families(v), bad
+
+
+def test_update_can_still_rewrite_an_existing_legacy_subfile(tmp_path):
+    # the new-name limits are for names being created; an existing over-long subfile stays updatable
+    roots = _roots(tmp_path)
+    legacy_rel = "references/" + "n" * 104 + ".md"  # portable: no reserved device name involved
+    body = GOOD_BODY + f"See {legacy_rel} for the notes\n"
+    assert promoter.promote(_create(body=GOOD_BODY), roots=roots)["ok"]
+    legacy = layer.symbol_dir("project", "foo", roots["project"]) / legacy_rel
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("old\n")
+    upd = {"action": "update", "name": "foo", "body": body, "files": {legacy_rel: "new\n"},
+           "reason": "r", "evidence": "e"}
+    v = promoter.promote(upd, roots=roots)
+    assert v["ok"], v["findings"]
+    fresh = "references/" + "m" * 104 + ".md"
+    bad = {**upd, "files": {fresh: "x\n"}, "body": GOOD_BODY + f"See {fresh} for the notes\n"}
+    assert "files" in _families(promoter.promote(bad, roots=roots))  # a new over-long name is still refused
+
+
+def test_create_rejects_a_name_live_in_the_other_layer(tmp_path):
+    # the user's global foo plus a project create foo would leave the name ambiguous for every later
+    # update, patch, delete and load count
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)
+    assert not skill_store.exists("project", "foo", roots["project"])
+
+
+def test_create_in_the_same_layer_is_not_blocked_by_the_other_layer_check(tmp_path):
+    roots = _roots(tmp_path)
+    assert promoter.promote(_create(level="project"), roots=roots)["ok"]
+    assert promoter.promote(_create(level="project"), roots=roots)["ok"]  # crash replay stays idempotent
+
+
+def test_create_checks_the_other_layer_even_with_global_disabled(tmp_path, monkeypatch):
+    # disabling global stops writes there; flipping it back must not reveal an ambiguous name
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    monkeypatch.setattr(promoter.config, "DISABLE_GLOBAL", True)
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)

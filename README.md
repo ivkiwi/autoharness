@@ -2,7 +2,7 @@
 <p align="center"><strong>Self-Learning Skills for Claude Code</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftigerless-labs%2Fautoharness%2Fmain%2F.claude-plugin%2Fplugin.json&query=%24.version&label=release&prefix=v&color=brightgreen" alt="release" /> <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="python" /> <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="platform" /> <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="license MIT" />
+  <img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftigerless-labs%2Fautoharness%2Fmain%2F.claude-plugin%2Fplugin.json&query=%24.version&label=release&prefix=v&color=brightgreen" alt="release" /> <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="python" /> <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="platform" /> <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="license MIT" /> <a href="https://repositoryradar.dev/repo/tigerless-labs/autoharness"><img src="https://repositoryradar.dev/badge/tigerless-labs/autoharness.svg" alt="Featured on Repository Radar" /></a>
 </p>
 
 **autoharness is a self-learning skill layer for Claude Code.** It **learns** skills from your real
@@ -46,22 +46,27 @@ Nothing to invoke, but one entry point exists when you want it: **`/learn`** dis
 you're in right now — say it after working something out and the lesson goes through the same
 proposal-and-validation chain the background pass uses.
 
-**MCP server naming.** The `.mcp.json` registers the server as `stage_skill`, but agent
+**MCP server naming.** `.claude-plugin/plugin.json` registers the server as `stage_skill`, but agent
 definitions reference the fully-qualified name `mcp__plugin_autoharness_stage_skill__stage_skill`.
 This translation is automatic: the plugin runtime constructs the qualified name from the plugin
-name in `.claude-plugin/plugin.json` (`autoharness`) and the server key in `.mcp.json`.
-Outside the plugin context (e.g., testing with `claude` directly), the tool would be available
-as `mcp__stage_skill__stage_skill` — but the agent allowlists still reference the plugin-namespaced
-form. Always install as a plugin to match both names.
+name (`autoharness`) and the server key. Outside the plugin context (e.g., registering the server
+by hand), the tool would be available as `mcp__stage_skill__stage_skill` — but the agent allowlists
+still reference the plugin-namespaced form. Always install as a plugin to match both names. The
+server is declared in the manifest, not in a root `.mcp.json`, because the plugin root is the repo
+root: a `.mcp.json` there would also be this checkout's project config, which outranks the plugin's
+same-command server and leaves the reflector without its tool in sessions inside the repo.
 
 
 ### Update
+
+Update and uninstall are shown in their terminal form (`claude plugin …`); inside Claude Code the same
+operations live in the `/plugin` menu.
 
 Update from a terminal — refresh the catalog by marketplace name, then update the plugin by its
 **full `plugin@marketplace` id**, then restart:
 
 ```
-claude plugin marketplace update autoharness       
+claude plugin marketplace update autoharness
 claude plugin update autoharness@autoharness
 ```
 
@@ -78,8 +83,8 @@ field is bumped.
 ### Uninstall
 
 ```
-claude plugin uninstall autoharness@autoharness     
-claude plugin marketplace remove autoharness       
+claude plugin uninstall autoharness@autoharness
+claude plugin marketplace remove autoharness
 ```
 
 Uninstalling only stops it from running — the skills it landed and its own state live **outside** the
@@ -149,7 +154,7 @@ Set them in the environment Claude Code launches with — either the shell
 ```
 
 Hooks read the environment on every event, so a change applies from the next session. The defaults
-are deliberate placeholders pending empirical calibration (tracked under `experiments/`); byte caps
+are deliberate placeholders pending empirical calibration; byte caps
 on captured windows and staged files are fixed constants, not env knobs.
 
 ## How it works
