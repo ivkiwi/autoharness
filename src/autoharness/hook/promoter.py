@@ -40,6 +40,7 @@ from autoharness.lib import (
     lock,
     notify,
     redact,
+    run_owners,
     sidecar,
     skill_store,
     validate,
@@ -341,11 +342,14 @@ def drain(run_id, *, roots=None, repo_name=None):
         # directory for good; land them here under the dead run's own id, which is the at-least-once
         # recovery the module docstring promises (atomic land makes the replay idempotent). A run
         # whose spawn parent still holds its live lock is not abandoned: it drains itself when the
-        # child exits, and a foreign drain would land its intents mid-flight (orphans also covers
-        # a .draining claim left by a drain that crashed before drop).
+        # child exits, and a foreign drain would land its intents mid-flight. Tracked detached runs
+        # use the stronger process-group recovery policy, so ordinary drains leave them to
+        # SessionStart even after the supervisor lock disappears (orphans also covers a .draining
+        # claim left by a drain that crashed before drop).
         landed = [_drain_run(orphan, roots=roots, repo_name=repo_name, proot=proot)
                   for orphan in intent_queue.orphans(proot)
-                  if orphan != run_id and not intent_queue.is_live(orphan, proot)]
+                  if (orphan != run_id and not intent_queue.is_live(orphan, proot)
+                      and not run_owners.tracked(orphan, proot))]
         verdicts, record = _drain_run(run_id, roots=roots, repo_name=repo_name, proot=proot)
         landed.append((verdicts, record))
     # after clear and outside the lock: the notification is fire-and-forget and must not hold

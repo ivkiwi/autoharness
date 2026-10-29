@@ -2,15 +2,15 @@
 
 Durable (recovers after a crash): only appends to a per-run file in the repo-layer state area, never
 touches the skill tree. promoter runs claim → land (atomic, idempotent) → drop: a crash between
-claim and drop leaves the claim file in place, and the next run's orphans scan recovers it
-(at-least-once + atomic land = effectively exactly-once); in the extreme case where nothing ran,
-zero land (fail-safe).
+claim and drop leaves the claim file in place. SessionStart retries tracked detached POSIX runs only
+after all registered writer groups disappear; the next ordinary drain can recover untracked queues
+(at-least-once + atomic land = effectively exactly-once). If nothing runs, zero land (fail-safe).
 """
 import json
 import os
 import re
 
-from autoharness.lib import atomic, layer, lock
+from autoharness.lib import atomic, layer, lock, run_owners
 
 _SAFE_RUN = re.compile(r"^[A-Za-z0-9_-]+$")
 UNREADABLE = "unreadable"  # key of the marker decoding returns for a line that is not a JSON object
@@ -34,7 +34,7 @@ def append(run_id, intent, root=None):
     # O_APPEND only keeps a write whole up to PIPE_BUF, and a staged skill body
     # runs well past that. Two overlapping reflector runs could interleave
     # mid-line, and the unparseable line jams every later drain of this run.
-    with locked(run_id, root):
+    with run_owners.writer(run_id, root), locked(run_id, root):
         # a torn tail with no newline would swallow this intent into its own unreadable line
         torn = p.exists() and p.stat().st_size > 0 and _last_byte(p) != b"\n"
         with p.open("a", encoding="utf-8") as f:
@@ -80,6 +80,11 @@ def clear(run_id, root=None):
 def _claim_path(run_id, root=None):
     p = _path(run_id, root)
     return p.with_name(f"{p.stem}.draining")
+
+
+def pending(run_id, root=None):
+    """True when a live queue or an atomic drain claim still needs resolution."""
+    return _path(run_id, root).exists() or _claim_path(run_id, root).exists()
 
 
 def _live_path(run_id, root=None):
