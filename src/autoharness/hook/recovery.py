@@ -40,8 +40,8 @@ def complete(path):
     if path is not None:
         with lock.file_lock(path.with_suffix(".lock")):
             owner = json.loads(path.read_text(encoding="utf-8"))
-            queue = path.parent.parent / "intents" / f"{path.stem}.jsonl"
-            if not queue.exists():
+            root = path.parents[2]  # <project>/autoharness/run_owners/<run>.json
+            if not intent_queue.pending(path.stem, root):
                 owner["status"] = "complete"
                 run_owners.write(path, owner)
 
@@ -83,7 +83,7 @@ def recover(*, roots):
                     continue
                 # A crash after clear but before consuming ownership must retain
                 # its existing run account, rather than replacing it with empty.
-                if intent_queue._path(run_id, root).exists():
+                if intent_queue.pending(run_id, root):
                     promoter.drain(run_id, roots=roots)
                     recovered.append(run_id)
                 owner["status"] = "complete"

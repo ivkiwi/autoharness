@@ -11,6 +11,8 @@ zero intrusion).
 ponytail: GC of orphan session counts (residue from crashed sessions) needs a session-liveness signal to sweep safely (a naive sweep would wrongly delete a concurrent session's live count), so it is deferred until that signal exists — the clear_session primitive is ready (Phase 4), policy left open in cap.md/mng.md.
 """
 import json
+import os
+import uuid
 from pathlib import Path
 
 from autoharness import config
@@ -67,7 +69,7 @@ def recall_index(roots, cwd=None):
             name = path.parent.name
             if not sidecar.is_agent_created(lyr, name, root):
                 continue
-            fm = validate._frontmatter(path.read_text()) or {}
+            fm = validate._frontmatter(path.read_text(encoding="utf-8")) or {}
             desc = _fit(fm.get("description") or "(no description)", config.INDEX_DESC_MAX_CHARS)
             cat = _sanitize(fm.get("category") or "general", 64) or "general"
             groups.setdefault(cat, []).append(f"- {_sanitize(name, 64)} [{lyr}]: {desc}")
@@ -90,14 +92,15 @@ def last_run_summary(roots):
     p = layer.state_dir(layer.PROJECT, roots.get(layer.PROJECT)) / "last_run.json"
     if not p.exists():
         return None
-    # Atomic rename to claim the file; concurrent callers get OSError and return None
-    consumed = p.with_suffix(".json.consuming")
+    # Each claimant owns a distinct destination: another drain may publish a new
+    # last_run.json before this consumer has finished reading its claimed record.
+    consumed = p.with_name(f"{p.name}.{uuid.uuid4().hex}.consuming")
     try:
         p.rename(consumed)
     except OSError:
         return None
     try:
-        last = json.loads(consumed.read_text())
+        last = json.loads(consumed.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return None
     finally:
@@ -105,7 +108,8 @@ def last_run_summary(roots):
             consumed.unlink()
         except OSError:
             pass
-    line = (f"autoharness last run: landed {last.get('landed', 0)}, "
+    # name the run so the numbers stay traceable when a Stop drained a dead sibling's queue
+    line = (f"autoharness last run ({last.get('run_id', 'unknown')}): landed {last.get('landed', 0)}, "
             f"rejected {last.get('rejected', 0)}")
     if last.get("families"):
         line += f" ({', '.join(last['families'])})"
@@ -132,6 +136,10 @@ def _members(lyr, root):
 
 
 def on_session_start(event=None, *, roots=None):
+    if os.environ.get(config.CHILD_SESSION_ENV):
+        # a reflector/curator child: it must not consume the user's last-run line, run the archive pass
+        # beside the parent, or get a second index on top of its bundle
+        return {"archived": {}, "context": None, "reason": "recursion_guard"}
     roots = roots or {}
     recovery.recover(roots=roots)
     archived = {}

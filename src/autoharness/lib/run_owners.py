@@ -18,6 +18,11 @@ def write(target, owner):
     atomic.write_text(target, json.dumps(owner))
 
 
+def tracked(run_id, root):
+    """True when recovery owns this run's adoption policy."""
+    return path(run_id, root).exists()
+
+
 @contextmanager
 def writer(run_id, root):
     """Register every writer's actual group before it can commit to a tracked queue.

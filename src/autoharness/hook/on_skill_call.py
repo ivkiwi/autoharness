@@ -54,10 +54,13 @@ def _count(name, roots, kind):
     if lyr is None:
         return {"counted": False, "reason": "not_managed"}
     root = roots.get(lyr)
-    if not sidecar.is_agent_created(lyr, name, root):
-        return {"counted": False, "reason": "not_agent_created"}
-    bump = sidecar.bump_use if kind == "use" else sidecar.bump_view
-    count = bump(lyr, name, root)
+    try:
+        if not sidecar.is_agent_created(lyr, name, root):
+            return {"counted": False, "reason": "not_agent_created"}
+        bump = sidecar.bump_use if kind == "use" else sidecar.bump_view
+        count = bump(lyr, name, root)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"counted": False, "reason": "sidecar_unavailable"}
     return {"counted": True, "kind": kind, "level": lyr, "name": name, "count": count}
 
 

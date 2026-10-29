@@ -52,6 +52,12 @@ from autoharness.lib import counters, layer  # noqa: E402
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
 _WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+_CHILD_ALLOWED_TOOLS = frozenset((
+    "Read",
+    "Grep",
+    "Glob",
+    "mcp__plugin_autoharness_stage_skill__stage_skill",
+))
 
 
 def _roots(roots):
@@ -110,6 +116,8 @@ def _consolidate_launch(run_id, roots):
 
 
 def dispatch(event, *, roots=None, reflect=None, consolidate=None):
+    if not isinstance(event, dict):
+        return {"ignored": True, "reason": "non-object hook input"}
     name = event.get("hook_event_name")
     roots = _roots(roots)
     proot = roots.get(layer.PROJECT)
@@ -124,8 +132,14 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
             if not config.DISABLE_GLOBAL:
                 counters.bump_request(layer.GLOBAL, roots.get(layer.GLOBAL))  # MNG denominator (per turn)
             pcount = counters.bump_request(layer.PROJECT, proot)
-            promoter.drain(config.INTERACTIVE_RUN_ID, roots=roots)  # /learn and other in-session proposals; no-op when empty
+            drain_error = None
+            try:
+                promoter.drain(config.INTERACTIVE_RUN_ID, roots=roots)  # /learn and other in-session proposals; no-op when empty
+            except Exception as exc:  # the queue stays for the next Stop; this turn still counts and reflects
+                drain_error = f"{type(exc).__name__}: {exc}"
             result = on_stop.on_stop(event, root=proot)
+            if drain_error:
+                result = {**result, "drain_error": drain_error}
             if result.get("triggered"):
                 fire(event, result, roots)
             if config.CONSOLIDATE_EVERY_N and pcount % config.CONSOLIDATE_EVERY_N == 0:
@@ -139,7 +153,9 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
         if name == "PreToolUse":
             tool = event.get("tool_name")
             child = bool(os.environ.get(config.CHILD_SESSION_ENV))
-            if tool in _WRITE_TOOLS and (child or _is_reflector(event)):
+            if child and tool not in _CHILD_ALLOWED_TOOLS:
+                return {"deny": True, "reason": "autoharness child may only read and stage intents"}
+            if tool in _WRITE_TOOLS and _is_reflector(event):
                 return {"deny": True, "reason": "reflector may only stage intents, not write files"}
             if not child:  # direction H: every main-session tool call advances the activity numerator
                 sid = event.get("session_id")
@@ -151,7 +167,7 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
             if tool == "Skill":
                 return {"handled": name, "result": on_skill_call.on_skill_call(event, roots=roots)}
             if tool == "Read":
-                if _is_reflector(event):
+                if child or _is_reflector(event):
                     return {"handled": name, "result": {"counted": False, "reason": "reflector_read"}}
                 return {"handled": name, "result": on_skill_call.on_skill_read(event, roots=roots)}
             return {"ignored": True, "reason": "untracked PreToolUse"}
@@ -178,9 +194,14 @@ def _emit(verdict):
     handled = verdict.get("handled")
     if handled:
         print(json.dumps({"handled": handled, "result": result}), file=sys.stderr)
+    elif verdict.get("error"):
+        print(json.dumps({"error": verdict["error"]}), file=sys.stderr)  # a crashed handler is not silent
 
 
 def main():
+    # the host writes UTF-8 JSON, whatever the locale codec (cp1252 on Windows) is; output is ASCII JSON
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     try:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):

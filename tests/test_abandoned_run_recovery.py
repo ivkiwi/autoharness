@@ -1,4 +1,5 @@
 """Real detached-process and SessionStart controls; no live model calls."""
+import errno
 import json
 import os
 import signal
@@ -56,6 +57,19 @@ def test_session_start_recovers_dead_owned_queue_and_surfaces_account(tmp_path):
     assert json.loads(path.read_text())["status"] == "complete"
 
 
+def test_session_start_recovers_dead_owned_atomic_claim(tmp_path):
+    roots = {"project": tmp_path / "p", "global": tmp_path / "g"}
+    path = abandoned(roots["project"])
+    assert len(intent_queue.take("dead", roots["project"])) == 1
+    assert not intent_queue._path("dead", roots["project"]).exists()
+
+    on_session_start.on_session_start(roots=roots)
+
+    assert skill_store.exists("project", "foo", roots["project"])
+    assert intent_queue.orphans(roots["project"]) == []
+    assert json.loads(path.read_text())["status"] == "complete"
+
+
 def test_live_child_prevents_adoption_after_supervisor_exits(tmp_path):
     roots = {"project": tmp_path / "p", "global": tmp_path / "g"}
     code = """import json,subprocess,sys,time
@@ -92,7 +106,7 @@ def test_retryable_filesystem_failure_retains_queue_and_owner(tmp_path, monkeypa
     path = abandoned(roots["project"])
     actual = promoter.promote
     def denied(*args, **kwargs):
-        raise PermissionError("owned transient denial")
+        raise OSError(errno.ENOSPC, "owned transient disk exhaustion")
     monkeypatch.setattr(promoter, "promote", denied)
     on_session_start.on_session_start(roots=roots)
     assert path.exists()
