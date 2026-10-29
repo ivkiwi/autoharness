@@ -182,6 +182,13 @@ def test_referenced_py_escaping_ref_is_not_read(tmp_path):
     finally:
         secret.unlink()
 
+def test_url_to_a_python_file_is_not_a_path_escape(tmp_path):
+    body = ("---\nname: foo\ndescription: d\n---\n"
+            "Fetch https://raw.githubusercontent.com/org/repo/main/tool.py before running.\n")
+    msgs = [m for _, m in validate.validate(GOOD_INTENT, body, base_dir=tmp_path)["findings"]]
+    assert not any("escapes the skill directory" in m for m in msgs)
+
+
 def test_referenced_subfile_escaping_ref_is_not_probed(tmp_path):
     # an escaping ref aimed at nothing outside must not be probed at all:
     # vulnerable code reports it as "neither carried in intent nor live"
@@ -344,3 +351,17 @@ def test_secret_in_subfile_rejects():
 def test_pii_alone_does_not_reject():
     body = GOOD_BODY + "\nSet the git author to dev@example.com.\n"
     assert validate.validate(GOOD_INTENT, body)["ok"]
+
+
+def test_nested_frontmatter_keys_are_not_top_level_fields():
+    # a nested `name:` must not satisfy the required top-level name
+    body = "---\ndescription: Use when X.\nmetadata:\n  name: foo\n---\n# Foo\n"
+    v = validate.validate(GOOD_INTENT, body)
+    assert ("structure", "missing name") in v["findings"]
+    assert "name" not in validate._frontmatter(body)
+    # ...nor may a nested `category:` be validated as the skill's category
+    body = "---\nname: foo\ndescription: Use when X.\nmetadata:\n  category: a/b\n---\n# Foo\n"
+    assert "category" not in _families(validate.validate(GOOD_INTENT, body))
+    # nor a wrapped scalar line that happens to contain a colon
+    body = "---\nname: foo\ndescription: Use when X\n  and Y: z\n---\n# Foo\n"
+    assert set(validate._frontmatter(body)) == {"name", "description"}

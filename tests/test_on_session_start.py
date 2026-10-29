@@ -8,6 +8,11 @@ from autoharness.hook import on_session_start
 from autoharness.lib import layer, sidecar, skill_store
 
 
+@pytest.fixture(autouse=True)
+def _not_a_child(monkeypatch):
+    monkeypatch.delenv(config.CHILD_SESSION_ENV, raising=False)  # ambient may set it
+
+
 def _roots(base):
     return {"global": base / "g", "project": base / "p"}
 
@@ -205,6 +210,18 @@ def test_summary_shown_even_with_empty_library(tmp_path):
     assert out["context"] and "rejected 3" in out["context"]  # anti-silence beats empty-index None
 
 
+def test_summary_names_the_run_that_drained(tmp_path):
+    # a Stop that drained a dead sibling's queue leaves the dead run's account as last_run;
+    # the line has to name it or the next session reads the numbers as its own
+    roots = {"global": tmp_path / "g", "project": tmp_path / "p"}
+    state = layer.state_dir("project", roots["project"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "last_run.json").write_text(json.dumps(
+        {"run_id": "deadrun", "landed": 1, "rejected": 0, "absorbed": 0, "families": []}))
+    line = on_session_start.last_run_summary(roots)
+    assert "deadrun" in line and "landed 1" in line
+
+
 def test_summary_line_reports_uncategorized_landings(tmp_path):
     # fail-open still has to be visible: a run that landed skills without a category says so
     roots = {"global": tmp_path / "g", "project": tmp_path / "p"}
@@ -308,3 +325,19 @@ def test_a_users_skill_with_a_windows_reserved_name_does_not_break_session_start
     (user / "SKILL.md").write_text("---\nname: con\ndescription: mine\n---\nb")
     out = on_session_start.on_session_start(roots=roots)
     assert "- foo [project]" in out["context"]
+
+
+def test_child_session_start_touches_nothing(tmp_path, monkeypatch):
+    # spawn marks reflector/curator children; their SessionStart fires against the parent's root
+    _small_knobs(monkeypatch)
+    roots = _roots(tmp_path)
+    state = layer.state_dir("project", roots["project"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "last_run.json").write_text(json.dumps({"run_id": "s1-50", "landed": 1, "rejected": 0}))
+    _set_requests(roots, "project", 100)
+    _seed(roots, "dead", calls=0)  # mature, zero use: a parent SessionStart would archive it
+    monkeypatch.setenv(config.CHILD_SESSION_ENV, "1")
+    out = on_session_start.on_session_start(roots=roots)
+    assert out["context"] is None and out["archived"] == {}
+    assert (state / "last_run.json").exists()  # the user still gets the summary
+    assert skill_store.exists("project", "dead", roots["project"])
