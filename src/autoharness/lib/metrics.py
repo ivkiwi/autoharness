@@ -34,7 +34,14 @@ def _archived_symbols(lyr, root):
     adir = layer.archive_dir(lyr, root)
     if not adir.exists():
         return []
-    return [p.parent.name for p in adir.glob(f"*/{skill_store.SKILL_FILE}")]
+    names = []
+    for path in adir.glob(f"*/{skill_store.SKILL_FILE}"):
+        try:
+            layer._check_name(path.parent.name)
+        except ValueError:
+            continue  # unmanaged archive entries must not reach guarded ledger paths
+        names.append(path.parent.name)
+    return names
 
 
 def _deaths(lyr, root, names):
@@ -58,7 +65,7 @@ def _funnel(lyr, root):
     if runs.exists():
         for path in runs.glob("*.json"):
             try:
-                run = json.loads(path.read_text())
+                run = json.loads(path.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 continue  # a corrupt account never breaks reporting
             for v in run.get("verdicts", []):

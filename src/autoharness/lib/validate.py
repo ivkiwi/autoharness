@@ -28,7 +28,8 @@ from autoharness.lib import layer, redact, skills_guard
 _FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n)?", re.DOTALL)
 _PLACEHOLDER = re.compile(r"\b(TODO|FIXME|XXX):|<(?:TODO|FIXME|XXX|TBD|PLACEHOLDER|REPLACE[_ ]?ME|INSERT[_ ]?HERE|FILL[_ ]?IN)>")
 _ABS_PATH = re.compile(r"(?:/home/|/Users/|/root/)[^\s`)\]]+|[A-Za-z]:\\[^\s`)\]]+")
-_PY_REF = re.compile(r"[\w./-]+\.py")
+# not after ":" -- a URL (https://host/tool.py) names a remote file, not a path under the skill dir
+_PY_REF = re.compile(r"(?<![\w./:-])[\w./-]+\.py")
 _SUBFILE_REF = re.compile(r"(?<![A-Za-z0-9_./-])(?:\./)?(?:{})/[A-Za-z0-9._/-]+".format("|".join(layer.SUBFILE_DIRS)))
 _MODIFY = ("update", "patch", "remove_file", "delete")
 # description-as-trigger proxy: a firing description names WHEN to use it ("use when …") or lists a
@@ -108,6 +109,8 @@ def _frontmatter(body):
         s = line.strip()
         if not s or s.startswith("#") or ":" not in line:
             continue
+        if line[0] in " \t":
+            continue  # nested mapping or wrapped scalar line: not a top-level field of the skill
         key, value = line.split(":", 1)
         v = value.strip()
         if re.fullmatch(r"[>|](?:[1-9][-+]?|[-+][1-9]?)?(?:[ \t]+#.*)?", v):
@@ -251,17 +254,30 @@ def _structure(body, base_dir, files=None):
             if not f.resolve().is_relative_to(base):
                 findings.append(("structure", f"referenced {ref} escapes the skill directory"))
                 continue
-            if f.is_file():
+            source = (files or {}).get(ref)
+            if isinstance(source, str) or f.is_file():
                 try:
-                    ast.parse(f.read_text())
+                    ast.parse(
+                        source if isinstance(source, str) else f.read_text(encoding="utf-8")
+                    )
                 except SyntaxError as exc:
                     findings.append(("structure", f"referenced {ref} has syntax error: {exc}"))
+                except UnicodeError as exc:
+                    findings.append(("structure", f"referenced {ref} could not be read: {exc}"))
+                except OSError as exc:
+                    # A live referenced file can become temporarily unreadable after is_file().
+                    # Preserve the original exception type for callers, but distinguish this read
+                    # failure from a permanently unlandable intent (bad name/path/permissions).
+                    exc._autoharness_retryable_read = True
+                    raise
         for ref in subfile_references(body, base_dir=base_dir, files=files):
             if ref not in (files or {}) and not (base_dir / ref).is_file():
                 findings.append(("structure", f"referenced {ref} neither carried in intent nor live"))
     for rel in files or {}:
-        if isinstance(rel, str) and rel not in body:
-            findings.append(("structure", f"carried subfile {rel} not referenced in SKILL.md body"))
+        if isinstance(rel, str):
+            pointer = re.compile(r"(?<![A-Za-z0-9_./-])(?:\./|\$\{CLAUDE_SKILL_DIR\}/)?" + re.escape(rel) + r"(?![A-Za-z0-9_/-])(?!\.[A-Za-z0-9_])")
+            if not pointer.search(body):
+                findings.append(("structure", f"carried subfile {rel} not referenced in SKILL.md body"))
     return findings
 
 
@@ -286,6 +302,8 @@ def validate(intent, body, *, target_is_agent_created=None, repo_name=None, base
 
         if _PLACEHOLDER.search(body):
             findings.append(("completeness", "contains TODO/placeholder"))
+        if _body_lines(body) == 0:
+            findings.append(("completeness", "skill body is empty"))
 
         # altitude: create/update author the full body, so this is where rule-level is set. patch is a
         # delta to a live skill -- capping it would strand existing over-long skills (can't even fix them).
@@ -325,5 +343,7 @@ def validate(intent, body, *, target_is_agent_created=None, repo_name=None, base
 
     if intent.get("action") in _MODIFY and target_is_agent_created is not True:
         findings.append(("self_produced", "target live skill not created_by:agent"))
+    elif intent.get("action") == "create" and target_is_agent_created is False:
+        findings.append(("self_produced", "create would overwrite a skill not created_by:agent"))
 
     return {"ok": not findings, "findings": findings}

@@ -1,7 +1,9 @@
 import errno
 import json
+import os
 import sys
 import threading
+import time
 
 import pytest
 
@@ -105,6 +107,121 @@ def test_create_stamps_only_after_pass(tmp_path):
     assert sidecar.read("project", "foo", roots["project"]) == {}  # never stamped unless validation passes
 
 
+def test_create_never_overwrites_a_handwritten_skill(tmp_path):
+    # the reflector only sees our index, so it can pick a name the user already hand-wrote
+    roots = _roots(tmp_path)
+    root = roots["project"]
+    mine = GOOD_BODY.replace("strftime", "my own notes")
+    skill_store.write_body("project", "foo", mine, root)  # user's work: no created_by
+    v = promoter.promote(_create(), roots=roots)
+    assert not v["ok"] and "self_produced" in _families(v)
+    assert skill_store.read_body("project", "foo", root) == mine
+    assert sidecar.read("project", "foo", root) == {}  # never adopted as ours
+
+
+def test_create_replay_over_our_own_skill_lands_and_keeps_counters(tmp_path):
+    # a crash between land and clear replays the create: our own skill, so it passes and keeps usage
+    roots = _roots(tmp_path)
+    root = roots["project"]
+    assert promoter.promote(_create(), roots=roots)["ok"]
+    sidecar.bump_use("project", "foo", root)
+    v = promoter.promote(_create(), roots=roots)
+    assert v["ok"], v["findings"]
+    assert sidecar.read("project", "foo", root)["use"] == 1
+
+
+@pytest.mark.parametrize("target, dies_in", [(skill_store, "write_body"), (sidecar, "create")])
+def test_create_that_died_midway_replays_as_ours(tmp_path, monkeypatch, target, dies_in):
+    # a crash once the dir exists must not leave it looking hand-written to the drain's replay
+    roots = _roots(tmp_path)
+    real = getattr(target, dies_in)
+
+    class Died(BaseException):  # the process dies: nothing in promote may catch it
+        pass
+
+    def crash(*a, **k):
+        raise Died
+    monkeypatch.setattr(target, dies_in, crash)
+    with pytest.raises(Died):
+        promoter.promote(_create(), roots=roots)
+    monkeypatch.setattr(target, dies_in, real)
+
+    v = promoter.promote(_create(), roots=roots)  # the drain's replay of the same intent
+    assert v["ok"], v["findings"]
+    assert skill_store.read_body("project", "foo", roots["project"]) == GOOD_BODY
+    assert sidecar.is_agent_created("project", "foo", roots["project"])
+
+
+def test_create_that_died_inside_its_sidecar_write_replays_as_ours(tmp_path, monkeypatch):
+    # atomic.write_bytes makes the skill dir before it publishes .sidecar.json: dying in between
+    # leaves an unmarked dir (plus a .tmp after a hard kill) that must not read as hand-written
+    from autoharness.lib import atomic
+    roots = _roots(tmp_path)
+    real_replace = atomic.os.replace
+
+    class Died(BaseException):
+        pass
+
+    def replace(src, dst):
+        if str(dst).endswith(sidecar.FILENAME):
+            raise Died
+        return real_replace(src, dst)
+    monkeypatch.setattr(atomic.os, "replace", replace)
+    with pytest.raises(Died):
+        promoter.promote(_create(), roots=roots)
+    monkeypatch.setattr(atomic.os, "replace", real_replace)
+    sdir = layer.symbol_dir("project", "foo", roots["project"])
+    (sdir / f"{sidecar.FILENAME}.x1y2z3.tmp").write_text("{")  # what a SIGKILL would leave
+
+    v = promoter.promote(_create(), roots=roots)
+    assert v["ok"], v["findings"]
+    assert sidecar.is_agent_created("project", "foo", roots["project"])
+
+
+def test_create_never_adopts_a_dir_holding_only_a_user_symlink(tmp_path, dir_link):
+    # the user's content can sit behind a link that a recursive walk does not descend into
+    roots = _roots(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "run.sh").write_text("echo mine\n")
+    user_dir = layer.symbol_dir("project", "foo", roots["project"])
+    user_dir.mkdir(parents=True)
+    dir_link(user_dir / "scripts", elsewhere)
+    v = promoter.promote(_create(), roots=roots)
+    assert not v["ok"] and "self_produced" in _families(v)
+    assert sidecar.read("project", "foo", roots["project"]) == {}  # never claimed
+
+
+def test_create_never_replaces_a_user_file_at_the_skill_path(tmp_path):
+    roots = _roots(tmp_path)
+    skills = layer.skills_dir("project", roots["project"])
+    skills.mkdir(parents=True)
+    (skills / "foo").write_text("a user's note\n")
+    v = promoter.promote(_create(), roots=roots)  # rejected, not a crash out of the drain
+    assert not v["ok"] and "self_produced" in _families(v)
+    assert (skills / "foo").read_text() == "a user's note\n"
+
+
+def test_create_is_not_blocked_by_file_manager_debris(tmp_path):
+    # Finder drops .DS_Store into a dir a crashed create left behind; that must not lock the name forever
+    roots = _roots(tmp_path)
+    left = layer.symbol_dir("project", "foo", roots["project"])
+    left.mkdir(parents=True)
+    (left / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    v = promoter.promote(_create(), roots=roots)
+    assert v["ok"], v["findings"]
+
+
+def test_create_never_writes_into_a_handwritten_skill_dir(tmp_path):
+    roots = _roots(tmp_path)
+    user_dir = layer.symbol_dir("project", "foo", roots["project"])
+    (user_dir / "scripts").mkdir(parents=True)  # a user's skill dir without SKILL.md (yet)
+    (user_dir / "scripts" / "run.sh").write_text("echo mine\n")
+    v = promoter.promote(_create(), roots=roots)
+    assert not v["ok"] and "self_produced" in _families(v)
+    assert not skill_store.exists("project", "foo", roots["project"])
+
+
 def test_update_requires_agent_created(tmp_path):
     roots = _roots(tmp_path)
     root = roots["project"]
@@ -187,12 +304,94 @@ def test_durable_queue_fail_safe_then_recover(tmp_path):
     assert intent_queue.orphans(proot) == []
 
 
+def test_drain_recovers_a_dead_run_leftovers(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("deadrun", _create(), proot)
+    promoter.drain("liverun", roots=roots)  # a different run drains: the dead one never came back
+    assert skill_store.exists("project", "foo", proot)
+    assert intent_queue.orphans(proot) == []
+    run = json.loads((layer.state_dir("project", proot) / "runs" / "deadrun.json").read_text())
+    assert run["verdicts"][0]["ok"]  # the dead run's verdict reached the account too
+
+
+def test_live_child_append_during_foreign_drain_is_not_lost(tmp_path, monkeypatch):
+    # review repro on #195: the main session's Stop drain adopts a reflector child's queue while
+    # the child is still staging; an intent appended after the drain read the file was unlinked
+    # unread by clear. The claim (rename under the append lock) sends that append to a fresh
+    # queue for the child's own drain instead.
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(name="foo"), proot)
+    real_promote, landing = promoter.promote, threading.Event()
+
+    def slow(intent, **kw):
+        landing.set()
+        time.sleep(0.3)  # the foreign drain is busy landing what it claimed
+        return real_promote(intent, **kw)
+
+    monkeypatch.setattr(promoter, "promote", slow)
+    t = threading.Thread(target=lambda: promoter.drain("interactive", roots=roots))
+    t.start()
+    assert landing.wait(5)
+    intent_queue.append("child", _create(name="bar"), proot)  # the live child stages mid-drain
+    t.join(5)
+    monkeypatch.setattr(promoter, "promote", real_promote)
+    promoter.drain("child", roots=roots)  # the child's own drain once it exits
+    assert skill_store.exists("project", "foo", proot)
+    assert skill_store.exists("project", "bar", proot), "intent staged by the live child was lost"
+
+
+def test_drain_leaves_a_live_runs_queue_to_its_own_pass(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(), proot)
+    with intent_queue.live_lock("child", proot):  # the spawn parent: child running, own drain pending
+        promoter.drain("interactive", roots=roots)  # the main session's Stop
+        assert not skill_store.exists("project", "foo", proot)  # not adopted while the run is live
+        assert intent_queue.read("child", proot)  # the queue itself is untouched
+    promoter.drain("laterun", roots=roots)  # the parent is gone: the next pass adopts the queue
+    assert skill_store.exists("project", "foo", proot)
+
+
+def test_leftover_draining_claim_from_a_crashed_drain_is_recovered(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(), proot)
+    assert len(intent_queue.take("child", proot)) == 1  # claimed; a crash before drop leaves it
+    assert intent_queue.read("child", proot) == []  # nothing left in the live queue
+    promoter.drain("laterun", roots=roots)
+    assert skill_store.exists("project", "foo", proot)  # replayed from the leftover claim
+    assert intent_queue.orphans(proot) == []
+
+
+def test_recovery_crash_does_not_replace_older_claim_with_new_queue(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(name="old"), proot)
+    assert [i["name"] for i in intent_queue.take("child", proot)] == ["old"]
+
+    # The first drain crashed with its claim in place, then the child staged another intent.
+    # A second recovery must retry only the old claim and leave the new queue on disk. If it
+    # replaces .draining with .jsonl here, another crash permanently loses "old".
+    intent_queue.append("child", _create(name="new"), proot)
+    assert [i["name"] for i in intent_queue.take("child", proot)] == ["old"]
+    assert [i["name"] for i in intent_queue.read("child", proot)] == ["new"]
+
+    intent_queue.drop("child", proot)
+    assert [i["name"] for i in intent_queue.take("child", proot)] == ["new"]
+    intent_queue.drop("child", proot)
+
+
 def test_drain_sweeps_orphan_tmp(tmp_path):
     roots = _roots(tmp_path)
     proot = roots["project"]
     sdir = layer.symbol_dir("project", "foo", proot)
     sdir.mkdir(parents=True)
-    (sdir / "SKILL.md.x.tmp").write_text("half-written")
+    orphan = sdir / "SKILL.md.x.tmp"
+    orphan.write_text("half-written")
+    old = time.time() - skill_store.ORPHAN_TMP_MIN_AGE_S - 1
+    os.utime(orphan, (old, old))
     promoter.drain("emptyrun", roots=roots)  # empty run, only triggers the startup sweep
     assert list(layer.skills_dir("project", proot).rglob("*.tmp")) == []
 
@@ -546,7 +745,7 @@ def test_drain_accounts_a_malformed_intent_once_and_lands_the_rest(tmp_path):
     intent_queue.append("r1", _create(), proot)
     intent_queue.append("r1", {"action": "patch", "name": "foo", "old_string": 5, "new_string": ["x"],
                                "reason": "r", "evidence": "e"}, proot)  # bypassed stage_skill's schema
-    with (layer.state_dir("project", proot) / "intents" / "r1.jsonl").open("a") as f:
+    with (layer.state_dir("project", proot) / "intents" / "r1.jsonl").open("a", encoding="utf-8") as f:
         f.write('{"torn": \n')
     intent_queue.append("r1", _create(name="bar", body=GOOD_BODY.replace("name: foo", "name: bar")), proot)
     verdicts = promoter.drain("r1", roots=roots)
@@ -659,3 +858,26 @@ def test_drain_waits_for_an_append_in_flight(tmp_path):
     d.join(5)
     assert [v["ok"] for v in out["v"]] == [True]
     assert skill_store.exists("project", "foo", proot)
+def test_create_rejects_a_name_live_in_the_other_layer(tmp_path):
+    # the user's global foo plus a project create foo would leave the name ambiguous for every later
+    # update, patch, delete and load count
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)
+    assert not skill_store.exists("project", "foo", roots["project"])
+
+
+def test_create_in_the_same_layer_is_not_blocked_by_the_other_layer_check(tmp_path):
+    roots = _roots(tmp_path)
+    assert promoter.promote(_create(level="project"), roots=roots)["ok"]
+    assert promoter.promote(_create(level="project"), roots=roots)["ok"]  # crash replay stays idempotent
+
+
+def test_create_checks_the_other_layer_even_with_global_disabled(tmp_path, monkeypatch):
+    # disabling global stops writes there; flipping it back must not reveal an ambiguous name
+    roots = _roots(tmp_path)
+    skill_store.write_body("global", "foo", GOOD_BODY, roots["global"])
+    monkeypatch.setattr(promoter.config, "DISABLE_GLOBAL", True)
+    v = promoter.promote(_create(level="project"), roots=roots)
+    assert not v["ok"] and "routing" in _families(v)

@@ -140,6 +140,8 @@ def _content_errors(params):
     errors += validate.check_files(files, creating=params["action"] == "create")
     errors += validate.structure(body, files)
     if params.get("action") in ("create", "update"):
+        if not validate._body_lines(body):
+            errors.append(("completeness", "skill body is empty after frontmatter"))
         # The promoter is the authority, but it runs after this session is gone: a description gate
         # enforced only there is one the model can never learn from — it stages, exits, and the
         # verdict lands in a file nobody reads back to it. Checking here hands the error to the
@@ -206,6 +208,8 @@ def handle(request, *, run_id, root=None):
                                        "inputSchema": TOOL_SCHEMA}]})
     if method == "tools/call":
         params = request.get("params") or {}
+        if not isinstance(params, dict):
+            return _err(req_id, -32602, "invalid params: expected an object")
         if params.get("name") != TOOL_NAME:
             return _err(req_id, -32602, f"unknown tool: {params.get('name')}")
         out = stage(params.get("arguments") or {}, run_id=run_id, root=root)
@@ -218,6 +222,9 @@ def handle(request, *, run_id, root=None):
 
 
 def serve(stdin=None, stdout=None):
+    if stdin is None and hasattr(sys.stdin, "reconfigure"):
+        # JSON-RPC arrives as UTF-8 whatever the locale codec is; responses are ASCII JSON
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     run_id = os.environ.get(config.RUN_ID_ENV) or config.INTERACTIVE_RUN_ID
@@ -226,7 +233,19 @@ def serve(stdin=None, stdout=None):
         line = line.strip()
         if not line:
             continue
-        response = handle(json.loads(line), run_id=run_id, root=root)
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            response = _err(None, -32700, "parse error")
+        else:
+            if not isinstance(request, dict):
+                response = _err(None, -32600, "invalid request")
+            else:
+                try:
+                    response = handle(request, run_id=run_id, root=root)
+                except Exception:  # last resort: one bad request must not end the session's server
+                    req_id = request.get("id")
+                    response = None if req_id is None else _err(req_id, -32603, "internal error")
         if response is not None:
             stdout.write(json.dumps(response) + "\n")
             stdout.flush()
