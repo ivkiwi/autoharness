@@ -26,6 +26,7 @@ validating admission (validate in-flight, persist only on allow) + POSIX atomic-
 
 ponytail: one drain per project root is now serialized through lib.lock (see drain). LED watermark still pends true values from CAP; the create anchor reads the layer request counter at land time (probation is fiction without a true anchor). Whole-run clear, the tiny crash window (between land and clear) may re-append the LED — per-item idempotent watermark pending the intent-queue granularity being finalized (validate-store open).
 """
+import errno
 import hashlib
 import json
 
@@ -282,6 +283,34 @@ def _account(run_id, intents, verdicts, proot):
     return record
 
 
+# the environment, not the intent: disk, quota, I/O, a read-only mount, transient pressure. Keep the
+# queue and retry. Any other OSError (permissions, a name too long, not a directory, ...) belongs to
+# this intent and would fail again on every Stop, wedging everything queued behind it.
+_ENVIRONMENTAL_ERRNOS = {getattr(errno, n) for n in ("ENOSPC", "EDQUOT", "EIO", "EROFS", "EAGAIN", "EINTR",
+                                                      "EBUSY", "ENFILE", "EMFILE") if hasattr(errno, n)}
+# Windows folds device, media, sharing and lock failures into EACCES (CPython PC/errmap.h); those are
+# transient too. A plain access denial (5, 65) and the rest stay with the intent.
+_ENVIRONMENTAL_WINERRORS = {*range(19, 37), 83, 108, 132, 167}
+
+
+def _environmental(exc):
+    return isinstance(exc, OSError) and (getattr(exc, "_autoharness_retryable_read", False)
+                                         or exc.errno in _ENVIRONMENTAL_ERRNOS
+                                         or getattr(exc, "winerror", None) in _ENVIRONMENTAL_WINERRORS)
+
+
+def _promote_one(intent, roots, repo_name):
+    if intent_queue.UNREADABLE in intent:
+        return _reject(None, None, [("queue", f"unreadable queue line: {intent[intent_queue.UNREADABLE]!r}")])
+    try:
+        return promote(intent, roots=roots, repo_name=repo_name)
+    except Exception as exc:
+        if _environmental(exc):
+            raise  # keep the queue so the next drain retries it
+        # a malformed or unlandable intent: account it once instead of replaying it on every Stop
+        return _reject(intent.get("action"), None, [("crash", f"{type(exc).__name__}: {exc}")])
+
+
 def _drain_run(run_id, *, roots, repo_name, proot):
     """Land one run's queued intents: take (atomic claim), promote, account, drop. Notification
     is the caller's job, so a fire-and-forget send never holds the drain lock. A promotion that
@@ -289,7 +318,7 @@ def _drain_run(run_id, *, roots, repo_name, proot):
     queue, so the next drain retries it instead of waiting for the orphans scan."""
     intents = intent_queue.take(run_id, proot)
     try:
-        verdicts = [promote(i, roots=roots, repo_name=repo_name) for i in intents]
+        verdicts = [_promote_one(i, roots, repo_name) for i in intents]
         record = _account(run_id, intents, verdicts, proot) if intents else None
     except BaseException:
         intent_queue.release(run_id, proot)
