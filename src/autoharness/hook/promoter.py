@@ -28,7 +28,6 @@ ponytail: one drain per project root is now serialized through lib.lock (see dra
 """
 import hashlib
 import json
-import re
 
 from autoharness import config
 from autoharness.lib import (
@@ -88,7 +87,7 @@ def _led(intent, evidence_ref):
 
 def _materialize_evidence(level, name, evidence, root):
     text = redact.redact(evidence)
-    rel = f"{layer.EVIDENCE_PREFIX}{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}.md"
+    rel = f"{layer.EVIDENCE_PREFIX}{hashlib.sha256(text.encode('utf-8')).hexdigest()}.md"
     p = layer.subfile_path(level, name, rel, root)
     if not p.exists():
         atomic.write_text(p, text)
@@ -113,12 +112,27 @@ def _remove_subfile(level, name, rel, root):
     if not p.resolve().is_relative_to(sdir):
         raise ValueError(f"subfile escapes the skill dir: {rel}")
     live = skill_store.read_body(level, name, root) or ""
-    # Use word-boundary check so scripts/run.py does not match scripts/run.py.bak
-    _ref = re.compile(r"(?<![A-Za-z0-9_./-])" + re.escape(rel) + r"(?![A-Za-z0-9_./-])")
-    if _ref.search(live):
+    # Use the same contextual pointer interpretation as admission. Mark the
+    # requested path known even if it is already absent: its pointer still needs patching out.
+    if rel in validate.subfile_references(live, base_dir=sdir, files={rel: ""}):
         raise ValueError(f"{rel} is still referenced by the live SKILL.md (patch the pointer out first)")
     if p.is_file():
         p.unlink()
+
+
+def _occupied(base_dir):
+    # a create that died inside its own sidecar write leaves only the bare dir and, after a hard kill,
+    # a top-level *.tmp orphan; anything else — a subdir, a symlink, the dir itself linked — is not ours
+    if base_dir.is_symlink():
+        return True
+    if not base_dir.is_dir():
+        return base_dir.exists()  # a plain file there is the user's too, not a free slot
+    return any(p.is_symlink() or not p.is_file() or (p.suffix != ".tmp" and p.name not in _OS_DEBRIS)
+               for p in base_dir.iterdir())
+
+
+# what a file manager drops into any folder it opens; not anyone's content
+_OS_DEBRIS = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 
 def _land(action, intent, body, level, name, root):
@@ -132,15 +146,14 @@ def _land(action, intent, body, level, name, root):
         evidence_ref = _materialize_evidence(level, name, intent.get("evidence"), root)
         ledger.append(level, name, _led(intent, evidence_ref), root)
         return
+    if action == "create" and not sidecar.read(level, name, root):
+        # claim the dir before anything lands in it, so a create that dies midway replays as ours, not
+        # as a hand-written skill; an existing sidecar is a crash replay — keep its counters
+        sidecar.create(level, name, counters.request_count(level, root), root)
     _land_files(level, name, intent.get("files"), root)
     evidence_ref = _materialize_evidence(level, name, intent.get("evidence"), root)
     skill_store.write_body(level, name, body, root)
-    if action == "create":
-        existing = sidecar.read(level, name, root)
-        if not existing:
-            sidecar.create(level, name, counters.request_count(level, root), root)
-        # crash-replay: sidecar already exists — skip create to preserve counters
-    else:
+    if action != "create":
         sidecar.bump_patch(level, name, root)  # update/patch: feeds the reuse-after-improvement pair
     ledger.append(level, name, _led(intent, evidence_ref), root)
 
@@ -149,6 +162,11 @@ def promote(intent, *, roots=None, repo_name=None):
     roots = roots or {}
     action = intent.get("action")
     name = intent.get("name")
+    if action == "create":
+        try:  # before any filesystem call: a name past NAME_MAX would raise, not reject
+            layer.check_new_name(name)
+        except ValueError as exc:
+            return _reject(action, None, [("shape", str(exc))])
 
     try:
         level = _resolve_level(intent, roots)
@@ -159,7 +177,27 @@ def promote(intent, *, roots=None, repo_name=None):
     if level == layer.GLOBAL and config.DISABLE_GLOBAL:
         return _reject(action, level,
                        [("routing", "global layer is disabled by AUTOHARNESS_DISABLE_GLOBAL")])
+    if action == "create":
+        # a second live copy in the other layer makes every later update/patch/delete and every load
+        # count ambiguous for good, whoever wrote the first one. Both layers, even with global disabled:
+        # disabling it stops writes there, and re-enabling it must not surface a collision.
+        try:
+            other = [lyr for lyr in layer.LAYERS
+                     if lyr != level and skill_store.exists(lyr, name, roots.get(lyr))]
+        except ValueError as exc:
+            return _reject(action, level, [("routing", str(exc))])
+        if other:
+            return _reject(action, level, [("routing", f"{name!r} is already live in the {other[0]} layer")])
 
+    if level == layer.GLOBAL:
+        # Per-project drain locks cannot coordinate another project's edits to
+        # the same global library. Keep local-only promotions independent.
+        with lock.file_lock(layer.state_dir(level, roots.get(level)) / "promote.lock"):
+            return _promote_resolved(intent, action, name, level, roots, repo_name)
+    return _promote_resolved(intent, action, name, level, roots, repo_name)
+
+
+def _promote_resolved(intent, action, name, level, roots, repo_name):
     root = roots.get(level)
     try:
         body = _shape(intent, level, root)
@@ -167,7 +205,10 @@ def promote(intent, *, roots=None, repo_name=None):
     except (ValueError, KeyError) as exc:
         return _reject(action, level, [("shape", str(exc))])
 
-    target_created = sidecar.is_agent_created(level, name, root) if action in _MODIFY else None
+    target_created = None
+    if action in _MODIFY or (action == "create" and _occupied(base_dir)):
+        # a create into an occupied directory is an overwrite: only of a skill we wrote (crash replay)
+        target_created = sidecar.is_agent_created(level, name, root)
 
     absorbed = intent.get("absorbed_into")
     if action == "delete" and absorbed:
@@ -241,6 +282,22 @@ def _account(run_id, intents, verdicts, proot):
     return record
 
 
+def _drain_run(run_id, *, roots, repo_name, proot):
+    """Land one run's queued intents: take (atomic claim), promote, account, drop. Notification
+    is the caller's job, so a fire-and-forget send never holds the drain lock. A promotion that
+    raises (a transient read failure on a referenced file, say) puts the whole batch back in the
+    queue, so the next drain retries it instead of waiting for the orphans scan."""
+    intents = intent_queue.take(run_id, proot)
+    try:
+        verdicts = [promote(i, roots=roots, repo_name=repo_name) for i in intents]
+        record = _account(run_id, intents, verdicts, proot) if intents else None
+    except BaseException:
+        intent_queue.release(run_id, proot)
+        raise
+    intent_queue.drop(run_id, proot)
+    return verdicts, record
+
+
 def drain(run_id, *, roots=None, repo_name=None):
     roots = roots or {}
     proot = roots.get(layer.PROJECT)
@@ -251,12 +308,20 @@ def drain(run_id, *, roots=None, repo_name=None):
     # the account comment below used to leave open to an external writer.
     with lock.file_lock(layer.state_dir(layer.PROJECT, proot) / "drain.lock"):
         sweep(roots)
-        intents = intent_queue.read(run_id, proot)
-        verdicts = [promote(i, roots=roots, repo_name=repo_name) for i in intents]
-        record = _account(run_id, intents, verdicts, proot) if intents else None
-        intent_queue.clear(run_id, proot)
-    if record:
-        # after clear and outside the lock: the notification is fire-and-forget and must not hold
-        # the next pass out of the state dir
-        notify.send(record)
+        # the queue is per-run, so a child that exits before its drain leaves its intents in the
+        # directory for good; land them here under the dead run's own id, which is the at-least-once
+        # recovery the module docstring promises (atomic land makes the replay idempotent). A run
+        # whose spawn parent still holds its live lock is not abandoned: it drains itself when the
+        # child exits, and a foreign drain would land its intents mid-flight (orphans also covers
+        # a .draining claim left by a drain that crashed before drop).
+        landed = [_drain_run(orphan, roots=roots, repo_name=repo_name, proot=proot)
+                  for orphan in intent_queue.orphans(proot)
+                  if orphan != run_id and not intent_queue.is_live(orphan, proot)]
+        verdicts, record = _drain_run(run_id, roots=roots, repo_name=repo_name, proot=proot)
+        landed.append((verdicts, record))
+    # after clear and outside the lock: the notification is fire-and-forget and must not hold
+    # the next pass out of the state dir
+    for _, rec in landed:
+        if rec:
+            notify.send(rec)
     return verdicts

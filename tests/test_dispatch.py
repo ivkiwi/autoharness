@@ -86,6 +86,25 @@ def test_triggered_stop_fires_reflect(tmp_path, monkeypatch):
     assert calls and calls[0]["session_id"] == "s1"
 
 
+def test_triggered_session_end_fires_reflect(tmp_path, monkeypatch):
+    # tail-catch: activity below the cadence at session close still reflects, through the dispatcher
+    monkeypatch.setattr(dispatch.on_session_end, "on_session_end",
+                        lambda e, **k: {"triggered": True, "session_id": "s1", "count": 3, "window_n": 3})
+    calls = []
+    out = dispatch.dispatch({"hook_event_name": "SessionEnd", "transcript_path": "/t.jsonl"},
+                            roots=_roots(tmp_path), reflect=lambda ev, res, roots: calls.append(res))
+    assert out["handled"] == "SessionEnd"
+    assert len(calls) == 1 and calls[0]["session_id"] == "s1"
+
+
+def test_untriggered_session_end_does_not_reflect(tmp_path, monkeypatch):
+    monkeypatch.setattr(dispatch.on_session_end, "on_session_end", lambda e, **k: {"triggered": False})
+    calls = []
+    dispatch.dispatch({"hook_event_name": "SessionEnd", "transcript_path": "/t.jsonl"},
+                      roots=_roots(tmp_path), reflect=lambda *a: calls.append(a))
+    assert calls == []
+
+
 def test_real_onstop_triggers_at_cadence(tmp_path):
     roots = _roots(tmp_path)
     for _ in range(config.REFLECT_EVERY_N):  # activity accumulated by PreToolUse; Stop only judges
@@ -267,9 +286,10 @@ def test_denied_reflector_write_reaches_the_host_as_deny_json(tmp_path, capsys):
     assert "stage intents" in hso["permissionDecisionReason"]
 
 
-def test_denied_child_write_reaches_the_host_as_deny_json(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("tool", ["Write", "Bash", "mcp__user_server__dangerous_tool"])
+def test_denied_child_tool_reaches_the_host_as_deny_json(tmp_path, monkeypatch, capsys, tool):
     monkeypatch.setenv(config.CHILD_SESSION_ENV, "1")
-    dispatch._emit(dispatch.dispatch({"hook_event_name": "PreToolUse", "tool_name": "Write",
+    dispatch._emit(dispatch.dispatch({"hook_event_name": "PreToolUse", "tool_name": tool,
                                        "session_id": "s7"}, roots=_roots(tmp_path)))
     assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -298,13 +318,26 @@ def test_stop_does_not_advance_activity(tmp_path):
     assert counters.session_count("s7", roots["project"]) == 0  # denominator yes, activity no
 
 
-# --- Phase 11 (G): child-session (fork) write tools are denied ---
+# --- Phase 11 (G): a fork child gets only the reflector's read/stage tool surface ---
 
-def test_child_session_write_denied(tmp_path, monkeypatch):
+
+@pytest.mark.parametrize("tool", ["Write", "Bash", "Skill", "WebFetch", "mcp__user__tool"])
+def test_child_session_tool_outside_allowlist_denied(tmp_path, monkeypatch, tool):
     monkeypatch.setenv(config.CHILD_SESSION_ENV, "1")
-    v = dispatch.dispatch({"hook_event_name": "PreToolUse", "tool_name": "Write",
+    v = dispatch.dispatch({"hook_event_name": "PreToolUse", "tool_name": tool,
                            "session_id": "s7"}, roots=_roots(tmp_path))
     assert v.get("deny")
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ["Read", "Grep", "Glob", "mcp__plugin_autoharness_stage_skill__stage_skill"],
+)
+def test_child_session_read_and_stage_allowlist_is_not_denied(tmp_path, monkeypatch, tool):
+    monkeypatch.setenv(config.CHILD_SESSION_ENV, "1")
+    v = dispatch.dispatch({"hook_event_name": "PreToolUse", "tool_name": tool,
+                           "tool_input": {}, "session_id": "s7"}, roots=_roots(tmp_path))
+    assert not v.get("deny")
 
 
 def _interactive_intent(name="learned"):
