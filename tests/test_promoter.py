@@ -305,6 +305,85 @@ def test_durable_queue_fail_safe_then_recover(tmp_path):
     assert intent_queue.orphans(proot) == []
 
 
+def test_drain_recovers_a_dead_run_leftovers(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("deadrun", _create(), proot)
+    promoter.drain("liverun", roots=roots)  # a different run drains: the dead one never came back
+    assert skill_store.exists("project", "foo", proot)
+    assert intent_queue.orphans(proot) == []
+    run = json.loads((layer.state_dir("project", proot) / "runs" / "deadrun.json").read_text())
+    assert run["verdicts"][0]["ok"]  # the dead run's verdict reached the account too
+
+
+def test_live_child_append_during_foreign_drain_is_not_lost(tmp_path, monkeypatch):
+    # review repro on #195: the main session's Stop drain adopts a reflector child's queue while
+    # the child is still staging; an intent appended after the drain read the file was unlinked
+    # unread by clear. The claim (rename under the append lock) sends that append to a fresh
+    # queue for the child's own drain instead.
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(name="foo"), proot)
+    real_promote, landing = promoter.promote, threading.Event()
+
+    def slow(intent, **kw):
+        landing.set()
+        time.sleep(0.3)  # the foreign drain is busy landing what it claimed
+        return real_promote(intent, **kw)
+
+    monkeypatch.setattr(promoter, "promote", slow)
+    t = threading.Thread(target=lambda: promoter.drain("interactive", roots=roots))
+    t.start()
+    assert landing.wait(5)
+    intent_queue.append("child", _create(name="bar"), proot)  # the live child stages mid-drain
+    t.join(5)
+    monkeypatch.setattr(promoter, "promote", real_promote)
+    promoter.drain("child", roots=roots)  # the child's own drain once it exits
+    assert skill_store.exists("project", "foo", proot)
+    assert skill_store.exists("project", "bar", proot), "intent staged by the live child was lost"
+
+
+def test_drain_leaves_a_live_runs_queue_to_its_own_pass(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(), proot)
+    with intent_queue.live_lock("child", proot):  # the spawn parent: child running, own drain pending
+        promoter.drain("interactive", roots=roots)  # the main session's Stop
+        assert not skill_store.exists("project", "foo", proot)  # not adopted while the run is live
+        assert intent_queue.read("child", proot)  # the queue itself is untouched
+    promoter.drain("laterun", roots=roots)  # the parent is gone: the next pass adopts the queue
+    assert skill_store.exists("project", "foo", proot)
+
+
+def test_leftover_draining_claim_from_a_crashed_drain_is_recovered(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(), proot)
+    assert len(intent_queue.take("child", proot)) == 1  # claimed; a crash before drop leaves it
+    assert intent_queue.read("child", proot) == []  # nothing left in the live queue
+    promoter.drain("laterun", roots=roots)
+    assert skill_store.exists("project", "foo", proot)  # replayed from the leftover claim
+    assert intent_queue.orphans(proot) == []
+
+
+def test_recovery_crash_does_not_replace_older_claim_with_new_queue(tmp_path):
+    roots = _roots(tmp_path)
+    proot = roots["project"]
+    intent_queue.append("child", _create(name="old"), proot)
+    assert [i["name"] for i in intent_queue.take("child", proot)] == ["old"]
+
+    # The first drain crashed with its claim in place, then the child staged another intent.
+    # A second recovery must retry only the old claim and leave the new queue on disk. If it
+    # replaces .draining with .jsonl here, another crash permanently loses "old".
+    intent_queue.append("child", _create(name="new"), proot)
+    assert [i["name"] for i in intent_queue.take("child", proot)] == ["old"]
+    assert [i["name"] for i in intent_queue.read("child", proot)] == ["new"]
+
+    intent_queue.drop("child", proot)
+    assert [i["name"] for i in intent_queue.take("child", proot)] == ["new"]
+    intent_queue.drop("child", proot)
+
+
 def test_drain_sweeps_orphan_tmp(tmp_path):
     roots = _roots(tmp_path)
     proot = roots["project"]
@@ -646,7 +725,7 @@ def test_drain_accounts_a_malformed_intent_once_and_lands_the_rest(tmp_path):
     intent_queue.append("r1", _create(), proot)
     intent_queue.append("r1", {"action": "patch", "name": "foo", "old_string": 5, "new_string": ["x"],
                                "reason": "r", "evidence": "e"}, proot)  # bypassed stage_skill's schema
-    with (layer.state_dir("project", proot) / "intents" / "r1.jsonl").open("a") as f:
+    with (layer.state_dir("project", proot) / "intents" / "r1.jsonl").open("a", encoding="utf-8") as f:
         f.write('{"torn": \n')
     intent_queue.append("r1", _create(name="bar", body=GOOD_BODY.replace("name: foo", "name: bar")), proot)
     verdicts = promoter.drain("r1", roots=roots)
@@ -759,6 +838,18 @@ def test_drain_waits_for_an_append_in_flight(tmp_path):
     d.join(5)
     assert [v["ok"] for v in out["v"]] == [True]
     assert skill_store.exists("project", "foo", proot)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_create_rejects_a_name_live_in_the_other_layer(tmp_path):

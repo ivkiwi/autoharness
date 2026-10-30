@@ -42,6 +42,7 @@ from autoharness.lib import (
     lock,
     notify,
     redact,
+    run_owners,
     sidecar,
     skill_store,
     validate,
@@ -329,7 +330,8 @@ _ENVIRONMENTAL_WINERRORS = {*range(19, 37), 83, 108, 132, 167}
 
 
 def _environmental(exc):
-    return isinstance(exc, OSError) and (exc.errno in _ENVIRONMENTAL_ERRNOS
+    return isinstance(exc, OSError) and (getattr(exc, "_autoharness_retryable_read", False)
+                                         or exc.errno in _ENVIRONMENTAL_ERRNOS
                                          or getattr(exc, "winerror", None) in _ENVIRONMENTAL_WINERRORS)
 
 
@@ -345,6 +347,26 @@ def _promote_one(intent, roots, repo_name):
         return _reject(intent.get("action"), None, [("crash", f"{type(exc).__name__}: {exc}")])
 
 
+def _drain_run(run_id, *, roots, repo_name, proot, provenance=None):
+    """Land one run's queued intents: take (atomic claim), promote, account, drop. Notification
+    is the caller's job, so a fire-and-forget send never holds the drain lock. A promotion that
+    raises (a transient read failure on a referenced file, say) puts the whole batch back in the
+    queue, so the next drain retries it instead of waiting for the orphans scan."""
+    intents = intent_queue.take(run_id, proot)
+    try:
+        verdicts = [_promote_one(i, roots, repo_name) for i in intents]
+        if config.PROPOSE_ONLY and intents:
+            # every intent whole, rejected ones too (a patch to a hand-written skill is exactly what the
+            # shared gate needs), durable before drop: a crash re-proposes, the gate drops the replay
+            canon_queue.append(run_id, intents, verdicts, provenance=provenance, project_root=proot)
+        record = _account(run_id, intents, verdicts, proot) if intents else None
+    except BaseException:
+        intent_queue.release(run_id, proot)
+        raise
+    intent_queue.drop(run_id, proot)
+    return verdicts, record
+
+
 def drain(run_id, *, roots=None, repo_name=None, provenance=None):
     roots = roots or {}
     proot = roots.get(layer.PROJECT)
@@ -356,17 +378,25 @@ def drain(run_id, *, roots=None, repo_name=None, provenance=None):
     with lock.file_lock(layer.state_dir(layer.PROJECT, proot) / "drain.lock"):
         if not config.PROPOSE_ONLY:  # the orphan sweep deletes files under skills/: a write like any other
             sweep(roots)
-        with intent_queue.locked(run_id, proot):  # a live /learn or reflector appends after we clear
-            intents = intent_queue.read(run_id, proot)
-            verdicts = [_promote_one(i, roots, repo_name) for i in intents]
-            if config.PROPOSE_ONLY and intents:
-                # every intent whole, rejected ones too (a patch to a hand-written skill is exactly what the
-                # shared gate needs), durable before clear: a crash re-proposes, the gate drops the replay
-                canon_queue.append(run_id, intents, verdicts, provenance=provenance, project_root=proot)
-            record = _account(run_id, intents, verdicts, proot) if intents else None
-            intent_queue.clear(run_id, proot)
-    if record:
-        # after clear and outside the lock: the notification is fire-and-forget and must not hold
-        # the next pass out of the state dir
-        notify.send(record)
+        # the queue is per-run, so a child that exits before its drain leaves its intents in the
+        # directory for good; land them here under the dead run's own id, which is the at-least-once
+        # recovery the module docstring promises (atomic land makes the replay idempotent). A run
+        # whose spawn parent still holds its live lock is not abandoned: it drains itself when the
+        # child exits, and a foreign drain would land its intents mid-flight. Tracked detached runs
+        # use the stronger process-group recovery policy, so ordinary drains leave them to
+        # SessionStart even after the supervisor lock disappears (orphans also covers a .draining
+        # claim left by a drain that crashed before drop).
+        landed = [_drain_run(orphan, roots=roots, repo_name=repo_name, proot=proot,
+                             provenance={"kind": "recovered", "run_id": orphan})
+                  for orphan in intent_queue.orphans(proot)
+                  if (orphan != run_id and not intent_queue.is_live(orphan, proot)
+                      and not run_owners.tracked(orphan, proot))]
+        verdicts, record = _drain_run(run_id, roots=roots, repo_name=repo_name, proot=proot,
+                                       provenance=provenance)
+        landed.append((verdicts, record))
+    # after clear and outside the lock: the notification is fire-and-forget and must not hold
+    # the next pass out of the state dir
+    for _, rec in landed:
+        if rec:
+            notify.send(rec)
     return verdicts

@@ -296,10 +296,19 @@ def test_private_key_block_redacts_body_and_end_line():
     assert redact.secret_hits(raw) == ["private_key_block"]
 
 
+def test_fine_grained_github_pat_is_redacted():
+    pat = "github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+    raw = f"cloned with {pat} ok"
+    assert redact.redact(raw) == "cloned with [REDACTED:secret:github_token] ok"
+    assert redact.secret_hits(raw) == ["github_token"]
+
+
 def test_quoted_key_assignments_are_redacted():
     # JSON / Python-dict / TOML-style assignments quote the key, and inside a JSONL transcript record
     # the quotes are backslash-escaped: the value must not survive any of those spellings.
-    secret = "sk_live_abcd1234EFGH5678ijkl"
+    # (no vendor prefix on purpose: this test is about the assignment rule alone, and secret_hits below
+    # would also list the vendor-key rule for an sk_live_ value)
+    secret = "abcd1234EFGH5678ijkl"
     for raw in (
         f'{{"api_key": "{secret}"}}',
         f'{{"password":"{secret}"}}',
@@ -316,13 +325,6 @@ def test_quoted_key_assignments_are_redacted():
 def test_quoted_key_rule_keeps_short_values_and_prose():
     raw = '{"token": "short"} and the "password" field is required'
     assert redact.redact(raw) == raw
-
-
-def test_fine_grained_github_pat_is_redacted():
-    pat = "github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
-    raw = f"cloned with {pat} ok"
-    assert redact.redact(raw) == "cloned with [REDACTED:secret:github_token] ok"
-    assert redact.secret_hits(raw) == ["github_token"]
 
 
 def test_an_assignment_inside_a_quoted_value_keeps_its_value_redacted():

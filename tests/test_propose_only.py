@@ -146,7 +146,7 @@ def test_summary_line_counts_proposals(roots):
     state.mkdir(parents=True)
     (state / "last_run.json").write_text(json.dumps({"landed": 0, "proposed": 2, "rejected": 1}))
     line = on_session_start.last_run_summary(roots)
-    assert line == "autoharness last run: landed 0, proposed 2, rejected 1"
+    assert line == "autoharness last run (unknown): landed 0, proposed 2, rejected 1"
 
 
 def test_drain_does_not_sweep_skill_dirs(roots, propose_only):

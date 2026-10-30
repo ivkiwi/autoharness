@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 
 MIN_PYTHON = (3, 11)  # tomllib (lib/redact.py) entered the stdlib here; README badge and CI matrix pin the same floor
 
@@ -51,6 +52,12 @@ from autoharness.lib import counters, layer, tails  # noqa: E402
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
 _WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch")  # Claude names; Codex reports its shell as Bash and patches as apply_patch
+# per harness: the Codex child reads through its shell (the read-only sandbox is the write backstop)
+# and sees stage_skill under the server name the carrier registers it with
+_CHILD_ALLOWED_TOOLS = {
+    "claude": frozenset(("Read", "Grep", "Glob", "mcp__plugin_autoharness_stage_skill__stage_skill")),
+    "codex": frozenset(("Bash", "mcp__stage_skill__stage_skill")),
+}
 
 
 def _roots(roots, cwd=None):
@@ -93,7 +100,7 @@ def _run_id(result):
     sid = _SANITIZE.sub("", raw)
     if not sid:
         sid = hashlib.sha256(raw.encode()).hexdigest()[:8] if raw else "run"
-    return f"{sid}-{result.get('count', 0)}"
+    return f"{sid}-{result.get('count', 0)}-{uuid.uuid4().hex}"
 
 
 def _curate_run_id(event, pcount):
@@ -185,7 +192,9 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
         if name == "PreToolUse":
             tool = event.get("tool_name")
             child = bool(os.environ.get(config.CHILD_SESSION_ENV))
-            if tool in _WRITE_TOOLS and (child or _is_reflector(event)):
+            if child and tool not in _CHILD_ALLOWED_TOOLS[layer.HARNESS]:
+                return {"deny": True, "reason": "autoharness child may only read and stage intents"}
+            if tool in _WRITE_TOOLS and _is_reflector(event):
                 return {"deny": True, "reason": "reflector may only stage intents, not write files"}
             if not child:  # direction H: every main-session tool call advances the activity numerator
                 sid = event.get("session_id")
@@ -197,7 +206,7 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
             if tool == "Skill":
                 return {"handled": name, "result": on_skill_call.on_skill_call(event, roots=roots)}
             if tool == "Read":
-                if _is_reflector(event):
+                if child or _is_reflector(event):
                     return {"handled": name, "result": {"counted": False, "reason": "reflector_read"}}
                 return {"handled": name, "result": on_skill_call.on_skill_read(event, roots=roots)}
             return {"ignored": True, "reason": "untracked PreToolUse"}

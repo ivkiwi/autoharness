@@ -1,17 +1,19 @@
-"""per-run intent queue: writer=stage_skill(append) / reader=promoter(read+clear), one shared source.
+"""per-run intent queue: writer=stage_skill(append) / reader=promoter(take+drop), one shared source.
 
 Durable (recovers after a crash): only appends to a per-run file in the repo-layer state area, never
-touches the skill tree. promoter runs read → land (atomic, idempotent) → clear: a crash between land
-and clear leaves the file in place, and the next run's orphans scan recovers it (at-least-once +
-atomic land = effectively exactly-once); in the extreme case where nothing ran, zero land (fail-safe).
+touches the skill tree. promoter runs claim → land (atomic, idempotent) → drop: a crash between
+claim and drop leaves the claim file in place. SessionStart retries tracked detached POSIX runs only
+after all registered writer groups disappear; the next ordinary drain can recover untracked queues
+(at-least-once + atomic land = effectively exactly-once). If nothing runs, zero land (fail-safe).
 """
 import json
+import os
 import re
 
-from autoharness.lib import layer, lock
+from autoharness.lib import atomic, layer, lock, run_owners
 
 _SAFE_RUN = re.compile(r"^[A-Za-z0-9_-]+$")
-UNREADABLE = "unreadable"  # key of the marker read() returns for a line that is not a JSON object
+UNREADABLE = "unreadable"  # key of the marker decoding returns for a line that is not a JSON object
 
 
 def _path(run_id, root=None):
@@ -21,8 +23,7 @@ def _path(run_id, root=None):
 
 
 def locked(run_id, root=None):
-    """The run's append lock. A drain holds it across read → land → clear, so it never reads a line
-    still being written and never clears one appended after its read."""
+    """The run's queue lock, shared by append, atomic claim, and claim release."""
     p = _path(run_id, root)
     return lock.file_lock(p.with_suffix(p.suffix + ".lock"))
 
@@ -33,7 +34,7 @@ def append(run_id, intent, root=None):
     # O_APPEND only keeps a write whole up to PIPE_BUF, and a staged skill body
     # runs well past that. Two overlapping reflector runs could interleave
     # mid-line, and the unparseable line jams every later drain of this run.
-    with locked(run_id, root):
+    with run_owners.writer(run_id, root), locked(run_id, root):
         # a torn tail with no newline would swallow this intent into its own unreadable line
         torn = p.exists() and p.stat().st_size > 0 and _last_byte(p) != b"\n"
         with p.open("a", encoding="utf-8") as f:
@@ -50,12 +51,16 @@ def read(run_id, root=None):
     p = _path(run_id, root)
     if not p.exists():
         return []
+    return _decode(p.read_text(encoding="utf-8", errors="replace"))
+
+
+def _decode(text):
     out = []
     # written as UTF-8 whatever the locale; a torn append (crash or full disk mid-line) must not take
     # the whole queue down with it, so an unreadable line comes back as a marker the drain accounts
     # "\n" only: json.dumps escapes newlines inside strings but writes U+2028 and friends raw, and
     # splitlines() would cut one intent in two
-    for line in p.read_text(encoding="utf-8", errors="replace").split("\n"):
+    for line in text.split("\n"):
         if not line.strip():
             continue
         try:
@@ -72,8 +77,85 @@ def clear(run_id, root=None):
         p.unlink()
 
 
+def _claim_path(run_id, root=None):
+    p = _path(run_id, root)
+    return p.with_name(f"{p.stem}.draining")
+
+
+def pending(run_id, root=None):
+    """True when a live queue or an atomic drain claim still needs resolution."""
+    return _path(run_id, root).exists() or _claim_path(run_id, root).exists()
+
+
+def _live_path(run_id, root=None):
+    p = _path(run_id, root)
+    return p.with_name(f"{p.stem}.live")
+
+
+def take(run_id, root=None):
+    """Claim the run's queue and return its intents, oldest first.
+
+    The claim renames <run>.jsonl to <run>.draining under the append lock, so an append that
+    lands after the claim starts a fresh <run>.jsonl for the run's own drain instead of racing
+    the drain's clear (a foreign drain of a live run's queue used to unlink a staged intent
+    unread). A .draining left by a drain that crashed before drop() is always retried by itself;
+    a newer .jsonl stays queued for the next drain. Replacing an old claim with that newer file
+    would lose the old batch if recovery crashed a second time.
+    """
+    p = _path(run_id, root)
+    claimed = _claim_path(run_id, root)
+    with locked(run_id, root):
+        if claimed.exists():
+            source = claimed
+        elif p.exists():
+            os.replace(p, claimed)
+            source = claimed
+        else:
+            return []
+        return _decode(source.read_text(encoding="utf-8", errors="replace"))
+
+
+def drop(run_id, root=None):
+    """Discard the claimed batch once every intent in it landed and was accounted."""
+    claimed = _claim_path(run_id, root)
+    if claimed.exists():
+        claimed.unlink()
+
+
+def release(run_id, root=None):
+    """Return a claimed batch to the queue so the next drain retries it.
+
+    A drain that raises mid-batch landed nothing it could account for, so the claim goes back
+    under the append lock, ahead of whatever was appended while it ran, and read() sees the
+    intents again. A drain killed outright cannot run this, and its claim is recovered by the
+    orphans scan instead.
+    """
+    p = _path(run_id, root)
+    claimed = _claim_path(run_id, root)
+    with locked(run_id, root):
+        if not claimed.exists():
+            return
+        lines = claimed.read_text(encoding="utf-8", errors="replace").split("\n")
+        if p.exists():
+            lines += p.read_text(encoding="utf-8", errors="replace").split("\n")
+        atomic.write_text(p, "".join(line + "\n" for line in lines if line.strip()))
+        claimed.unlink()
+
+
+def live_lock(run_id, root=None):
+    """The run's liveness marker: held by the spawn parent for the child's whole run plus its
+    own drain, so a foreign drain can tell an abandoned queue from a run that will drain itself."""
+    return lock.file_lock(_live_path(run_id, root))
+
+
+def is_live(run_id, root=None):
+    """True while some process holds the run's live lock (its spawn parent is still working)."""
+    return lock.held(_live_path(run_id, root))
+
+
 def orphans(root=None):
+    """Undrained run ids: a live queue, or a claim a crashed drain never dropped."""
     d = layer.state_dir(layer.PROJECT, root) / "intents"
     if not d.exists():
         return []
-    return sorted(f.stem for f in d.glob("*.jsonl"))
+    return sorted({f.stem for pattern in ("*.jsonl", "*.draining") for f in d.glob(pattern)})

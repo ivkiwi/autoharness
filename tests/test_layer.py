@@ -250,3 +250,61 @@ def test_project_root_global_layer_unaffected(linked_worktree, monkeypatch):
     monkeypatch.chdir(linked_worktree)
     assert layer.default_root(layer.GLOBAL) == layer.default_root(layer.GLOBAL)
     assert ".claude/worktrees" not in str(layer.default_root(layer.GLOBAL))
+
+
+# --- project root: a session started inside the project's .claude dir ---
+
+def test_project_root_inside_claude_dir_maps_to_its_owner(main_repo, monkeypatch):
+    skills = main_repo / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    assert _project_root_at(monkeypatch, skills) == main_repo / ".claude"
+
+
+def test_project_root_claude_dir_itself_maps_to_its_owner(main_repo, monkeypatch):
+    (main_repo / ".claude").mkdir()
+    assert _project_root_at(monkeypatch, main_repo / ".claude") == main_repo / ".claude"
+
+
+def test_project_root_claude_dir_as_its_own_repo_maps_to_its_owner(main_repo, monkeypatch):
+    config = main_repo / ".claude"
+    config.mkdir()
+    _git(config, "init", "-q")
+    skills = config / "skills"
+    skills.mkdir()
+    assert _project_root_at(monkeypatch, skills) == main_repo / ".claude"
+
+
+def test_project_root_separate_repo_inside_claude_dir_stays_cwd(main_repo, monkeypatch):
+    nested = main_repo / ".claude" / "plugins" / "tool"
+    nested.mkdir(parents=True)
+    _git(nested, "init", "-q")
+    assert _project_root_at(monkeypatch, nested) == nested / ".claude"
+
+
+def test_project_root_under_home_claude_dir_stays_cwd(main_repo, monkeypatch):
+    # the home .claude is the global layer: mapping to its owner would merge the two layers
+    monkeypatch.setenv("HOME", str(main_repo))
+    skills = main_repo / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    layer._main_worktree_root_resolved.cache_clear()
+    assert _project_root_at(monkeypatch, skills) == skills / ".claude"
+
+
+def test_project_root_non_git_claude_dir_stays_cwd(tmp_path, monkeypatch):
+    skills = tmp_path / "proj" / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    assert _project_root_at(monkeypatch, skills) == skills / ".claude"
+
+
+def test_project_root_inside_claude_dir_without_toplevel_stays_cwd(main_repo, monkeypatch):
+    skills = main_repo / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    real_run = subprocess.run
+
+    def no_toplevel(cmd, *args, **kwargs):
+        if "--show-toplevel" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: not a work tree")
+        return real_run(cmd, *args, **kwargs)
+    monkeypatch.setattr(layer.subprocess, "run", no_toplevel)
+    layer._main_worktree_root_resolved.cache_clear()
+    assert layer._main_worktree_root(str(skills)) == skills

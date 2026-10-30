@@ -99,26 +99,49 @@ def _kept(rx, validator, text):
 
 
 def _spans(text, key):
-    """Disjoint [start, end, rank, token] spans covering every rule match in *text*, in order. A match
-    that overlaps another extends its span instead of being dropped: a key block whose Comment line held
-    an AWS key id kept its whole body when the block lost to the earlier aws rule."""
+    """Disjoint [start, end, rank, token] spans covering every rule match in *text*, in order.
+
+    Matches in the same category are unioned so a narrower match cannot expose the rest of a wider
+    secret. Secret spans retain their existing precedence over overlapping PII spans: for example, the
+    e-mail-shaped tail of URL credentials must not consume the non-secret host name.
+    """
     raw = _raw(text, key)
-    found = sorted(
-        (match.start(), match.end(), rank, _token(category, name))
-        for rank, (category, name, rx, validator) in enumerate(_rules(key))
-        for match in _kept(rx, validator, text)
-        if raw(match)
-    )
-    spans = []
-    for start, end, rank, token in found:
-        if spans and start < spans[-1][1]:
-            last = spans[-1]
-            last[1] = max(last[1], end)
-            if rank < last[2]:
-                last[2:] = [rank, token]
-        else:
-            spans.append([start, end, rank, token])
-    return spans
+    rules = _rules(key)
+    found = {
+        category: sorted(
+            (match.start(), match.end(), rank, _token(category, name))
+            for rank, (rule_category, name, rx, validator) in enumerate(rules)
+            if rule_category == category
+            for match in _kept(rx, validator, text)
+            if raw(match)
+        )
+        for category in ("secret", "pii")
+    }
+
+    def merge(matches):
+        spans = []
+        for start, end, rank, token in matches:
+            if spans and start < spans[-1][1]:
+                last = spans[-1]
+                last[1] = max(last[1], end)
+                if rank < last[2]:
+                    last[2:] = [rank, token]
+            else:
+                spans.append([start, end, rank, token])
+        return spans
+
+    secrets = merge(found["secret"])
+    secret_starts = [start for start, _, _, _ in secrets]
+
+    def overlaps_secret(match):
+        start, end, _, _ = match
+        i = bisect.bisect_right(secret_starts, start) - 1
+        return (i >= 0 and secrets[i][1] > start) or (
+            i + 1 < len(secrets) and secrets[i + 1][0] < end
+        )
+
+    pii = merge(match for match in found["pii"] if not overlaps_secret(match))
+    return sorted([*secrets, *pii], key=lambda span: span[0])
 
 
 def redact(text, rules_path=None):

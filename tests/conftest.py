@@ -52,3 +52,9 @@ def _private_gate_and_flags(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(config, "PROPOSE_ONLY", False)
     monkeypatch.setattr(config, "DISABLE_GLOBAL", False)
     monkeypatch.setattr(config, "GATE_WORKSPACE_ROOTS", [])
+    # and in env, for the subprocesses some tests start: an inherited AUTOHARNESS_PROPOSE_ONLY=1 queued
+    # their fixtures into the real gate
+    monkeypatch.setenv("AUTOHARNESS_GATE_DIR", str(gate / "skill-gate"))
+    monkeypatch.setenv("AUTOHARNESS_CANON_ROOT", str(gate / "agents"))
+    for name in ("AUTOHARNESS_PROPOSE_ONLY", "AUTOHARNESS_HARNESS", "AUTOHARNESS_DISABLE_GLOBAL"):
+        monkeypatch.delenv(name, raising=False)

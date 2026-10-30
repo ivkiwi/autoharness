@@ -261,12 +261,22 @@ def _structure(body, base_dir, files=None):
                     ast.parse(source if isinstance(source, str) else f.read_text(encoding="utf-8"))
                 except SyntaxError as exc:
                     findings.append(("structure", f"referenced {ref} has syntax error: {exc}"))
+                except UnicodeError as exc:
+                    findings.append(("structure", f"referenced {ref} could not be read: {exc}"))
+                except OSError as exc:
+                    # A live referenced file can become temporarily unreadable after is_file().
+                    # Preserve the original exception type for callers, but distinguish this read
+                    # failure from a permanently unlandable intent (bad name/path/permissions).
+                    exc._autoharness_retryable_read = True
+                    raise
         for ref in subfile_references(body, base_dir=base_dir, files=files):
             if ref not in (files or {}) and not (base_dir / ref).is_file():
                 findings.append(("structure", f"referenced {ref} neither carried in intent nor live"))
     for rel in files or {}:
-        if isinstance(rel, str) and rel not in body:
-            findings.append(("structure", f"carried subfile {rel} not referenced in SKILL.md body"))
+        if isinstance(rel, str):
+            pointer = re.compile(r"(?<![A-Za-z0-9_./-])(?:\./|\$\{CLAUDE_SKILL_DIR\}/)?" + re.escape(rel) + r"(?![A-Za-z0-9_/-])(?!\.[A-Za-z0-9_])")
+            if not pointer.search(body):
+                findings.append(("structure", f"carried subfile {rel} not referenced in SKILL.md body"))
     return findings
 
 
@@ -291,6 +301,8 @@ def validate(intent, body, *, target_is_agent_created=None, repo_name=None, base
 
         if _PLACEHOLDER.search(body):
             findings.append(("completeness", "contains TODO/placeholder"))
+        if _body_lines(body) == 0:
+            findings.append(("completeness", "skill body is empty"))
 
         # altitude: create/update author the full body, so this is where rule-level is set. patch is a
         # delta to a live skill -- capping it would strand existing over-long skills (can't even fix them).

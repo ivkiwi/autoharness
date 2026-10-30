@@ -43,7 +43,8 @@ def test_structure_rejects_malformed_frontmatter_closing_delimiter(closing, late
 def test_frontmatter_closing_delimiter_at_eof_passes():
     body = "---\nname: foo\ndescription: Use when formatting a date as ISO.\n---"
     v = validate.validate(GOOD_INTENT, body)
-    assert v["ok"], v["findings"]
+    # the frontmatter closes; the only complaint left is that nothing follows it (#237)
+    assert v["findings"] == [("completeness", "skill body is empty")]
 
 
 def test_indented_frontmatter_delimiter_in_block_scalar_passes():

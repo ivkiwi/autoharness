@@ -25,10 +25,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from autoharness import config
-from autoharness.hook import capture, promoter
+from autoharness.hook import capture, promoter, recovery
 from autoharness.lib import (
     atomic,
     counters,
+    intent_queue,
     layer,
     redact,
     sidecar,
@@ -315,9 +316,13 @@ def run(window_text, run_id, *, roots, repo_name=None, agent=None, claude_bin=No
             payload = preface + build_bundle(window_text, description_index(roots), spec, digest=digest)
 
         env = child_env(run_id, proot)
-        proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, payload, run_id, roots)
-    verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance=provenance)
-    _record_spawn_failure(run_id, roots, proc, argv)
+        # the live lock marks the run as having a spawn parent: between here and the own drain below,
+        # a foreign drain (the main session's Stop) leaves this queue alone instead of landing the
+        # child's intents mid-flight or racing its appends
+        with intent_queue.live_lock(run_id, proot):
+            proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, payload, run_id, roots)
+            verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance=provenance)
+            _record_spawn_failure(run_id, roots, proc, argv)
     return verdicts
 
 
@@ -353,9 +358,10 @@ def run_curator(run_id, *, roots, repo_name=None, agent=None, claude_bin=None,
     with _child_cwd() as cwd:
         argv, preface = _carrier(agent or config.CURATOR_AGENT, run_id, roots.get(layer.PROJECT), claude_bin, cwd=cwd)
         env = child_env(run_id, roots.get(layer.PROJECT))
-        proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, preface + bundle, run_id, roots)
-    verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance={"kind": "curator"})
-    _record_spawn_failure(run_id, roots, proc, argv)
+        with intent_queue.live_lock(run_id, roots.get(layer.PROJECT)):  # same liveness marker as reflection
+            proc = _invoke_spawn(spawn_fn or _detached_spawn, argv, env, preface + bundle, run_id, roots)
+            verdicts = promoter.drain(run_id, roots=roots, repo_name=repo_name, provenance={"kind": "curator"})
+            _record_spawn_failure(run_id, roots, proc, argv)
     return verdicts
 
 
@@ -363,11 +369,15 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--curate":
         run_id, proot, groot = argv[1:]
-        return run_curator(run_id, roots={layer.PROJECT: Path(proot), layer.GLOBAL: Path(groot)})
+        owner = recovery.track(run_id, Path(proot))
+        result = run_curator(run_id, roots={layer.PROJECT: Path(proot), layer.GLOBAL: Path(groot)})
+        recovery.complete(owner)
+        return result
     transcript_path, session_id, run_id, proot, groot = argv
     roots = {layer.PROJECT: Path(proot), layer.GLOBAL: Path(groot)}
     # the note this reflection answers for; a Stop during the child may write a newer one
     launched_from = (tails.read(session_id, roots[layer.PROJECT]) or {}).get("version") if layer.HARNESS == "codex" else None
+    owner = recovery.track(run_id, roots[layer.PROJECT])
     offset = counters.session_offset(session_id, roots[layer.PROJECT])
     window_text, new_offset = capture.window(transcript_path, offset)
     provenance = {"kind": "reflector", "session_id": session_id, "transcript_path": transcript_path,
@@ -391,10 +401,12 @@ def main(argv=None):
         raise
     if outcome.get("returncode", 0) != 0:
         _window_not_fed(session_id, new_offset, roots[layer.PROJECT])
+        recovery.complete(owner)  # the failed child's queue was drained all the same
         return result
     counters.write_session_offset(session_id, new_offset, roots[layer.PROJECT])
     if layer.HARNESS == "codex":
         tails.settle(session_id, launched_from, new_offset, roots[layer.PROJECT])
+    recovery.complete(owner)
     return result
 
 

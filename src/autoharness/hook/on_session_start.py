@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 from autoharness import config
+from autoharness.hook import recovery
 from autoharness.lib import counters, layer, lifecycle, sidecar, skill_store, validate
 
 log = logging.getLogger(__name__)
@@ -117,7 +118,8 @@ def last_run_summary(roots):
             consumed.unlink()
         except OSError:
             pass
-    line = (f"autoharness last run: landed {last.get('landed', 0)}, "
+    # name the run so the numbers stay traceable when a Stop drained a dead sibling's queue
+    line = (f"autoharness last run ({last.get('run_id', 'unknown')}): landed {last.get('landed', 0)}, "
             + (f"proposed {last['proposed']}, " if last.get("proposed") else "")
             + f"rejected {last.get('rejected', 0)}")
     families = last.get("families")
@@ -151,6 +153,7 @@ def on_session_start(event=None, *, roots=None):
         # beside the parent, or get a second index on top of its bundle
         return {"archived": {}, "context": None, "reason": "recursion_guard"}
     roots = roots or {}
+    recovery.recover(roots=roots)
     archived, proposed_archive = {}, {}
     for lyr in config.active_layers():
         root = roots.get(lyr)

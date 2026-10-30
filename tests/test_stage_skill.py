@@ -434,3 +434,5 @@ def test_each_staging_gets_its_own_id_and_a_retry_keeps_it(tmp_path):
     first, second = (r["stage_id"] for r in intent_queue.read(RUN, tmp_path))
     assert first != second
     assert [r["stage_id"] for r in intent_queue.read(RUN, tmp_path)] == [first, second]  # re-read: stable
+
+
