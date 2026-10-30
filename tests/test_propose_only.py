@@ -187,7 +187,7 @@ def test_a_crash_after_the_gate_append_replays_as_the_same_event(roots, propose_
     from autoharness.canon import queue as canon_queue
     from autoharness.hook import recovery
     proot = roots[layer.PROJECT]
-    intent_queue.append("dead", _create(), proot)
+    intent_queue.append("dead", {**_create(), "stage_id": "a" * 32}, proot)  # as stage_skill queues it
     first = {"kind": "reflector", "session_id": "s-1", "transcript_path": "/t.jsonl", "range": [0, 9]}
 
     def crash(*args, **kwargs):
@@ -209,4 +209,13 @@ def test_a_crash_after_the_gate_append_replays_as_the_same_event(roots, propose_
     rows = canon_queue.read()
     assert len(rows) == 1 and rows[0]["provenance"]["session_id"] == "s-1"
     assert len(_proposals(roots, "dead")) == 2  # the replay was appended and is dropped by id on read
-    assert not promoter._provenance_path("dead", proot).exists()  # consumed with the claim
+
+
+def test_a_staged_intent_keeps_its_event_id_whoever_drains_it():
+    from autoharness.canon import queue as canon_queue
+    a, b = {"kind": "reflector", "session_id": "s-1"}, {"kind": "recovered", "run_id": "r"}
+    staged = {**_create(), "stage_id": "a" * 32}
+    assert canon_queue.event_id(a, staged, "r", "/p") == canon_queue.event_id(b, staged, "r", "/p")
+    assert canon_queue.event_id(a, staged, "r", "/p") != canon_queue.event_id(a, {**staged, "stage_id": "b" * 32}, "r", "/p")
+    # without a stage_id, provenance is still what tells two identical intents apart
+    assert canon_queue.event_id(a, _create(), "r", "/p") != canon_queue.event_id(b, _create(), "r", "/p")

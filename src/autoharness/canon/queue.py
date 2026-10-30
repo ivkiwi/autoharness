@@ -25,9 +25,13 @@ def redaction_version():
 
 def event_id(provenance, intent, run_id=None, project_root=None):
     # run and project are part of the event: one curator pass in two projects is two events, while a
-    # crash replay of the same run in the same project hashes the same and is dropped
-    key = {"provenance": {k: provenance.get(k) for k in _PROVENANCE_KEYS}, "intent": intent,
-           "run_id": run_id, "project_root": str(project_root) if project_root else None}
+    # crash replay of the same run in the same project hashes the same and is dropped. A staged intent
+    # carries a stage_id unique to its staging, which already tells two events apart: provenance stays
+    # out of its key, since a replay is drained by whoever comes next (an orphan drain, SessionStart
+    # recovery, another session's Stop) under that drainer's provenance
+    key = {"intent": intent, "run_id": run_id, "project_root": str(project_root) if project_root else None}
+    if not intent.get("stage_id"):
+        key["provenance"] = {k: provenance.get(k) for k in _PROVENANCE_KEYS}
     return hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
