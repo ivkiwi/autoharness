@@ -354,6 +354,8 @@ def _drain_run(run_id, *, roots, repo_name, proot, provenance=None):
     queue, so the next drain retries it instead of waiting for the orphans scan."""
     intents = intent_queue.take(run_id, proot)
     try:
+        if config.PROPOSE_ONLY and intents:
+            provenance = _claim_provenance(run_id, proot, provenance)
         verdicts = [_promote_one(i, roots, repo_name) for i in intents]
         if config.PROPOSE_ONLY and intents:
             # every intent whole, rejected ones too (a patch to a hand-written skill is exactly what the
@@ -364,7 +366,28 @@ def _drain_run(run_id, *, roots, repo_name, proot, provenance=None):
         intent_queue.release(run_id, proot)
         raise
     intent_queue.drop(run_id, proot)
+    _provenance_path(run_id, proot).unlink(missing_ok=True)
     return verdicts, record
+
+
+def _provenance_path(run_id, proot):
+    return intent_queue._path(run_id, proot).with_suffix(".provenance.json")
+
+
+def _claim_provenance(run_id, proot, provenance):
+    """The provenance a claimed batch is first proposed with, kept until drop. It is part of the gate's
+    event id, so a replay after a crash between the gate append and drop (an orphan drain, SessionStart
+    recovery, the next interactive Stop) must reuse it, or the gate takes the replay for a new event.
+    Kept across release too: the released intents may already be in the gate."""
+    p = _provenance_path(run_id, proot)
+    try:
+        stored = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(stored, dict):
+            return stored
+    except (OSError, ValueError):
+        pass  # none yet, or torn by a crash mid-write: nothing reached the gate under it
+    atomic.write_text(p, json.dumps(provenance or {}, ensure_ascii=False))
+    return provenance
 
 
 def drain(run_id, *, roots=None, repo_name=None, provenance=None):

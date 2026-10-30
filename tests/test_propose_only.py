@@ -180,3 +180,33 @@ def test_proposed_merge_is_not_counted_as_absorbed(roots, propose_only, monkeypa
     assert (last["landed"], last["proposed"], last["absorbed"]) == (0, 1, 0)
     funnel = metrics.collect(roots)[layer.PROJECT]["funnel"]
     assert (funnel["landed"], funnel["held"], funnel["rejected"]) == (0, 1, 0)
+
+
+@pytest.mark.parametrize("replay", ["orphan_drain", "recovery"])
+def test_a_crash_after_the_gate_append_replays_as_the_same_event(roots, propose_only, monkeypatch, replay):
+    from autoharness.canon import queue as canon_queue
+    from autoharness.hook import recovery
+    proot = roots[layer.PROJECT]
+    intent_queue.append("dead", _create(), proot)
+    first = {"kind": "reflector", "session_id": "s-1", "transcript_path": "/t.jsonl", "range": [0, 9]}
+
+    def crash(*args, **kwargs):
+        raise SystemExit("killed between the gate append and drop")
+    account = promoter._account
+    monkeypatch.setattr(promoter, "_account", crash)
+    with pytest.raises(SystemExit):
+        promoter.drain("dead", roots=roots, provenance=first)
+    monkeypatch.setattr(promoter, "_account", account)  # not undo(): that would drop conftest's gate isolation
+    if replay == "orphan_drain":
+        promoter.drain("other", roots=roots)
+    else:
+        owner = layer.state_dir(layer.PROJECT, proot) / "run_owners" / "dead.json"
+        owner.parent.mkdir(parents=True, exist_ok=True)
+        owner.write_text(json.dumps({"version": 1, "status": "active", "process_groups": [2 ** 30]}))
+        monkeypatch.setattr(recovery, "_group_gone", lambda group: True)
+        assert recovery.recover(roots=roots) == ["dead"]
+
+    rows = canon_queue.read()
+    assert len(rows) == 1 and rows[0]["provenance"]["session_id"] == "s-1"
+    assert len(_proposals(roots, "dead")) == 2  # the replay was appended and is dropped by id on read
+    assert not promoter._provenance_path("dead", proot).exists()  # consumed with the claim
