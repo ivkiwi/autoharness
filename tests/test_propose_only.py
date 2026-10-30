@@ -211,11 +211,15 @@ def test_a_crash_after_the_gate_append_replays_as_the_same_event(roots, propose_
     assert len(_proposals(roots, "dead")) == 2  # the replay was appended and is dropped by id on read
 
 
-def test_a_staged_intent_keeps_its_event_id_whoever_drains_it():
+def test_a_staged_intent_read_once_whoever_drained_it(roots):
     from autoharness.canon import queue as canon_queue
-    a, b = {"kind": "reflector", "session_id": "s-1"}, {"kind": "recovered", "run_id": "r"}
     staged = {**_create(), "stage_id": "a" * 32}
-    assert canon_queue.event_id(a, staged, "r", "/p") == canon_queue.event_id(b, staged, "r", "/p")
-    assert canon_queue.event_id(a, staged, "r", "/p") != canon_queue.event_id(a, {**staged, "stage_id": "b" * 32}, "r", "/p")
-    # without a stage_id, provenance is still what tells two identical intents apart
-    assert canon_queue.event_id(a, _create(), "r", "/p") != canon_queue.event_id(b, _create(), "r", "/p")
+    canon_queue.append("r", [staged], [{"ok": True}], provenance={"kind": "reflector", "session_id": "s-1"},
+                       project_root="/p")
+    canon_queue.append("r", [staged], [{"ok": True}], provenance={"kind": "recovered", "run_id": "r"},
+                       project_root="/p")  # a replay: another id, the same staging
+    canon_queue.append("r", [{**staged, "stage_id": "b" * 32}], [{"ok": True}], project_root="/p")
+    canon_queue.append("r", [staged], [{"ok": True}], project_root="/q")  # another project is another event
+    rows = canon_queue.read()
+    assert [(r["intent"]["stage_id"][0], r["project_root"]) for r in rows] == [("a", "/p"), ("b", "/p"), ("a", "/q")]
+    assert rows[0]["provenance"]["session_id"] == "s-1"  # the first row, the one decisions are bound to

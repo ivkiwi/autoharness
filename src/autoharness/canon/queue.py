@@ -25,13 +25,9 @@ def redaction_version():
 
 def event_id(provenance, intent, run_id=None, project_root=None):
     # run and project are part of the event: one curator pass in two projects is two events, while a
-    # crash replay of the same run in the same project hashes the same and is dropped. A staged intent
-    # carries a stage_id unique to its staging, which already tells two events apart: provenance stays
-    # out of its key, since a replay is drained by whoever comes next (an orphan drain, SessionStart
-    # recovery, another session's Stop) under that drainer's provenance
-    key = {"intent": intent, "run_id": run_id, "project_root": str(project_root) if project_root else None}
-    if not intent.get("stage_id"):
-        key["provenance"] = {k: provenance.get(k) for k in _PROVENANCE_KEYS}
+    # crash replay of the same run in the same project hashes the same and is dropped
+    key = {"provenance": {k: provenance.get(k) for k in _PROVENANCE_KEYS}, "intent": intent,
+           "run_id": run_id, "project_root": str(project_root) if project_root else None}
     return hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -77,6 +73,13 @@ def read():
             if not (isinstance(row, dict) and isinstance(row.get("id"), str) and isinstance(row.get("intent"), dict)
                     and isinstance(row.get("verdict"), dict)) or row["id"] in seen:
                 continue  # a foreign or torn envelope is skipped before it can be deduplicated
-            seen.add(row["id"])
+            # a staged intent's stage_id is unique to its staging: a replay drained by someone else (an
+            # orphan drain, SessionStart recovery, another session's Stop) carries that drainer's
+            # provenance and so another id, and the first row, whose id decisions are bound to, wins
+            staged = row["intent"].get("stage_id")
+            staging = ("stage", staged, row.get("run_id"), row.get("project_root")) if isinstance(staged, str) else None
+            if staging in seen:
+                continue
+            seen.update({row["id"], staging} - {None})
             rows.append(row)
     return sorted(rows, key=lambda r: r.get("at", 0))
