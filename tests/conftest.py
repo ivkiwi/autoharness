@@ -5,6 +5,13 @@ import pytest
 from autoharness import config
 from autoharness.lib import layer
 
+_PLACEMENT_ENV = (
+    "AUTOHARNESS_PROJECT_DIR",
+    "AUTOHARNESS_STATE_HOME",
+    "AUTOHARNESS_INDEX_BODY_PATHS",
+    "CLAUDE_CONFIG_DIR",
+)
+
 
 @pytest.fixture
 def dir_link():
@@ -27,6 +34,13 @@ def _no_host_project_dir(monkeypatch):
     # every cwd-based root test
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.delenv(config.PROJECT_ROOT_ENV, raising=False)
+    for name in _PLACEMENT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "SKILL_PREFIX", "")
+    monkeypatch.setattr(config, "CHILD_ISOLATION", False)
+    monkeypatch.setattr(config, "INDEX_BODY_PATHS", False)
+    monkeypatch.setattr(config, "REFLECTOR_MODEL", None)
+    monkeypatch.setattr(config, "CURATOR_MODEL", None)
 
 
 @pytest.fixture(autouse=True)
@@ -52,9 +66,11 @@ def _private_gate_and_flags(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(config, "PROPOSE_ONLY", False)
     monkeypatch.setattr(config, "DISABLE_GLOBAL", False)
     monkeypatch.setattr(config, "GATE_WORKSPACE_ROOTS", [])
+    monkeypatch.setattr(config, "INDEX_ROOTS", "")  # its codex default is the real ~/.agents canon
     # and in env, for the subprocesses some tests start: an inherited AUTOHARNESS_PROPOSE_ONLY=1 queued
     # their fixtures into the real gate
     monkeypatch.setenv("AUTOHARNESS_GATE_DIR", str(gate / "skill-gate"))
     monkeypatch.setenv("AUTOHARNESS_CANON_ROOT", str(gate / "agents"))
-    for name in ("AUTOHARNESS_PROPOSE_ONLY", "AUTOHARNESS_HARNESS", "AUTOHARNESS_DISABLE_GLOBAL"):
+    for name in ("AUTOHARNESS_PROPOSE_ONLY", "AUTOHARNESS_HARNESS", "AUTOHARNESS_DISABLE_GLOBAL",
+                 "AUTOHARNESS_INDEX_ROOTS"):
         monkeypatch.delenv(name, raising=False)
