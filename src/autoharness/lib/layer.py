@@ -133,11 +133,22 @@ def default_root(layer, cwd=None):
         override = os.environ.get(GLOBAL_ROOT_ENV, "").strip()
         if override:
             return Path(override).expanduser()
-        return Path.home() / host_dir()
+        config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() if HARNESS == "claude" else ""
+        return Path(config_dir).expanduser() if config_dir else Path.home() / host_dir()
     pinned = os.environ.get(PROJECT_ROOT_ENV)
     if pinned:
         return Path(pinned)
-    return _main_worktree_root(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or str(Path.cwd())) / host_dir()
+    project_dir = os.environ.get("AUTOHARNESS_PROJECT_DIR") or host_dir()
+    return _main_worktree_root(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or str(Path.cwd())) / project_dir
+
+
+def _state_home():
+    configured = os.environ.get("AUTOHARNESS_STATE_HOME", "").strip()
+    return Path(configured).expanduser() if configured else None
+
+
+def _state_key(root):
+    return hashlib.sha256(str(Path(root).resolve()).encode("utf-8")).hexdigest()
 
 
 def _root(layer, root):
@@ -150,11 +161,16 @@ def skills_dir(layer, root=None):
 
 
 def archive_dir(layer, root=None):
-    return skills_dir(layer, root) / ".archive"
+    if _state_home() is None:
+        return skills_dir(layer, root) / ".archive"
+    return state_dir(layer, root) / "archive"
 
 
 def state_dir(layer, root=None):
-    return _root(layer, root) / "autoharness"
+    home = _state_home()
+    if home is None:
+        return _root(layer, root) / "autoharness"
+    return home / layer / _state_key(_root(layer, root))
 
 
 def symbol_dir(layer, name, root=None):

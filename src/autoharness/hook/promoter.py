@@ -8,8 +8,9 @@ validating admission (validate in-flight, persist only on allow) + POSIX atomic-
 - Shaping: create/update = intent body; patch = read live + apply delta; delete = None (removal).
 - Layer resolution: create takes the intent `level`; update/patch/delete go through skill_store.find
   (same name across layers errors, missing is rejected).
-- Validation: reuse lib.validate's six classes, fed {**intent, level: resolved layer} (the global gate
-  applies to update too).
+- Validation: reuse lib.validate's six classes, fed {**intent, level: resolved layer} (the global gate applies
+  to update too); backticked cross-skill pointers resolve against the same two-layer store, with the
+  batch's own names (including the create's) pre-seeded so same-run references cannot false-positive.
 - Land (after pass): land intent subfiles first (paths re-gated; every landing parent resolved and
   escape-checked BEFORE any write — a pre-planted symlink rejects with zero writes) → materialize the
   evidence slice into references/evidence-<hash>.md (redacted again at this egress, content-addressed →
@@ -20,7 +21,8 @@ validating admission (validate in-flight, persist only on allow) + POSIX atomic-
   os.replace carries the slices along). remove_file = drop one subfile (path re-gated + escape-checked;
   rejected while the live SKILL.md still references it; missing target = no-op, so crash replays stay
   idempotent) + evidence + LED with the removed path. Reject = zero writes, no stamp, no ledger.
-- Drain: read queue → promote one by one → clear at the end (at-least-once + atomic land = effectively
+- Drain: read queue → promote one by one (a delete folding into a skill the same run writes waits for
+  that write and falls with it) → clear at the end (at-least-once + atomic land = effectively
   exactly-once); on startup sweep orphan .tmp. On a crash, unprocessed intents stay in the durable queue
   and are retried next time; in the extreme of never running → zero land (fail-safe).
 
@@ -36,6 +38,7 @@ from autoharness.canon import queue as canon_queue
 from autoharness.lib import (
     atomic,
     counters,
+    git_exclude,
     intent_queue,
     layer,
     ledger,
@@ -49,6 +52,7 @@ from autoharness.lib import (
 )
 
 _MODIFY = ("update", "patch", "remove_file", "delete")
+_WRITES = ("create", "update", "patch")
 
 
 def _reject(action, level, findings):
@@ -172,7 +176,9 @@ def _land(action, intent, body, level, name, root):
     _land_files(level, name, intent.get("files"), root)
     evidence_ref = _materialize_evidence(level, name, intent.get("evidence"), root)
     skill_store.write_body(level, name, body, root)
-    if action != "create":
+    if action == "create":
+        git_exclude.ensure(layer.skills_dir(level, root), config.SKILL_PREFIX)
+    else:
         sidecar.bump_patch(level, name, root)  # update/patch: feeds the reuse-after-improvement pair
     ledger.append(level, name, _led(intent, evidence_ref), root)
 
@@ -185,6 +191,22 @@ def promote(intent, *, roots=None, repo_name=None):
     roots = roots or {}
     action = intent.get("action")
     name = intent.get("name")
+    if action == "suggest":
+        # A suggestion is the safe escape hatch for a read-only owner: account and notify it, but
+        # never resolve a layer, validate against a writable skill, or touch the skill trees.
+        findings = []
+        for field in ("name", "reason", "evidence"):
+            value = intent.get(field)
+            if not isinstance(value, str) or not value.strip():
+                findings.append(("schema", f"suggest {field} must be a non-empty string"))
+        forbidden = [field for field in ("level", "body", "old_string", "new_string", "files",
+                                          "path", "absorbed_into")
+                     if intent.get(field) is not None]
+        if forbidden:
+            findings.append(("schema", f"suggest takes no mutation fields: {', '.join(forbidden)}"))
+        if findings:
+            return _reject(action, None, findings)
+        return {"ok": True, "action": action, "level": None, "findings": [], "notes": []}
     if action == "create":
         try:  # before any filesystem call: a name past NAME_MAX would raise, not reject
             layer.check_new_name(name)
@@ -241,6 +263,7 @@ def _promote_resolved(intent, action, name, level, roots, repo_name):
         target_created = sidecar.is_agent_created(level, name, root)
 
     absorbed = intent.get("absorbed_into")
+    umbrella_level = None
     if action == "delete" and absorbed:
         # fail-closed absorption claim (direction D, Hermes trust-chain tier 1): the umbrella must be
         # a live, self-produced skill distinct from the target — a hallucinated name rejects the intent.
@@ -252,14 +275,17 @@ def _promote_resolved(intent, action, name, level, roots, repo_name):
                 or not sidecar.is_agent_created(alevel, absorbed, roots.get(alevel)):
             return _reject(action, level,
                            [("absorbed_into", f"umbrella {absorbed!r} is not a live self-produced skill")])
+        umbrella_level = alevel
 
     verdict = validate.validate(
         {**intent, "level": level}, body,
         target_is_agent_created=target_created, repo_name=repo_name, base_dir=base_dir,
+        skill_roots=roots,
     )
     if not verdict["ok"]:
         return _reject(action, level, verdict["findings"])
 
+    earned = sidecar.read(level, name, root) if umbrella_level else {}
     try:
         _check_landing(action, intent, level, name, root)
         if config.PROPOSE_ONLY:
@@ -268,6 +294,10 @@ def _promote_resolved(intent, action, name, level, roots, repo_name):
         _land(action, intent, body, level, name, root)
     except ValueError as exc:
         return _reject(action, level, [("landing", str(exc))])
+    if umbrella_level:
+        # the umbrella inherits the evidence of use, or graduation review reads it as a zero-use skill
+        sidecar.credit(umbrella_level, absorbed, use=earned.get("use", 0), view=earned.get("view", 0),
+                       root=roots.get(umbrella_level))
     return {"ok": True, "action": action, "level": level, "findings": [], "notes": _notes(action, body)}
 
 
@@ -295,12 +325,21 @@ def _account(run_id, intents, verdicts, proot):
     """Run-level verdict account (direction B, anti-silence): the per-symbol LED records only landed
     facts, so a rejected create would vanish without trace — this account is where verdicts live.
     last_run.json feeds the one-line SessionStart summary and is consumed after one injection."""
-    rows = [{"action": v.get("action"), "name": i.get("name"), "ok": v["ok"],
-             "findings": [f[0] for f in v.get("findings", [])], "notes": v.get("notes", []),
-             **({"proposed": True} if v.get("proposed") else {})}
-            for i, v in zip(intents, verdicts, strict=True)]
+    rows = []
+    for intent, verdict in zip(intents, verdicts, strict=True):
+        row = {"action": verdict.get("action"), "name": intent.get("name"), "ok": verdict["ok"],
+               "findings": [f[0] for f in verdict.get("findings", [])],
+               "notes": verdict.get("notes", [])}
+        if verdict.get("proposed"):
+            row["proposed"] = True
+        if intent.get("action") == "suggest" and verdict["ok"]:
+            row["suggestion"] = redact.redact(str(intent.get("reason") or ""))
+            row["evidence"] = redact.redact(str(intent.get("evidence") or ""))
+        rows.append(row)
     proposed = sum(1 for r in rows if r.get("proposed"))
-    landed = sum(1 for r in rows if r["ok"]) - proposed
+    landed = sum(1 for r in rows if r["ok"] and r.get("action") != "suggest" and not r.get("proposed"))
+    suggested = sum(1 for r in rows if r["ok"] and r.get("action") == "suggest")
+    rejected = sum(1 for r in rows if not r["ok"])
     absorbed = sum(1 for i, v in zip(intents, verdicts, strict=True)
                    if v["ok"] and not v.get("proposed") and i.get("action") == "delete" and i.get("absorbed_into"))
     families = sorted({f for r in rows if not r["ok"] for f in r["findings"]})
@@ -309,10 +348,13 @@ def _account(run_id, intents, verdicts, proot):
     runs.mkdir(parents=True, exist_ok=True)
     record = {"run_id": run_id, "verdicts": rows}
     atomic.write_text(runs / f"{run_id}.json", json.dumps(record, ensure_ascii=False, indent=2))
+    suggestions = [{"owner": r["name"], "suggestion": r["suggestion"]}
+                   for r in rows if r.get("action") == "suggest" and r["ok"]]
     atomic.write_text(state / "last_run.json",
                       json.dumps({"run_id": run_id, "landed": landed, "proposed": proposed,
-                                  "rejected": len(rows) - landed - proposed, "absorbed": absorbed,
+                                  "rejected": rejected, "suggested": suggested, "absorbed": absorbed,
                                   "families": families,
+                                  "suggestions": suggestions,
                                   "uncategorized": sum(1 for r in rows
                                                        if "category" in r["notes"] and not r.get("proposed"))},
                                  ensure_ascii=False))
@@ -347,6 +389,67 @@ def _promote_one(intent, roots, repo_name):
         return _reject(intent.get("action"), None, [("crash", f"{type(exc).__name__}: {exc}")])
 
 
+def _written_name(intent):
+    name = intent.get("name")
+    return name if intent.get("action") in _WRITES and isinstance(name, str) else None
+
+
+def _waits_for_umbrella(intent, written):
+    # a delete of a skill the run also writes is a replacement, and only works in queue order
+    name, absorbed = intent.get("name"), intent.get("absorbed_into")
+    return (intent.get("action") == "delete" and isinstance(name, str) and name not in written
+            and isinstance(absorbed, str) and absorbed in written)
+
+
+def _waits_for_skill_pointer(verdict, written):
+    """A missing pointer into this run may become valid after its target lands."""
+    prefix, suffix = "referenced skill ", " does not exist"
+    return any(family == "structure" and detail.startswith(prefix) and detail.endswith(suffix)
+               and detail[len(prefix):-len(suffix)] in written
+               for family, detail in verdict.get("findings", []))
+
+
+def _promote_run(intents, roots, repo_name):
+    """Judge one run's intents; the verdicts come back in queue order.
+
+    Intents stand alone, except that a delete folding into a skill this run writes is the second half
+    of one move. It waits until the run's writes are judged and is rejected if one to its umbrella
+    was: the umbrella may well be live, but the skill's content never reached it."""
+    written = {_written_name(i) for i in intents} - {None}
+    verdicts = [None] * len(intents)
+    held, pointer_waiters = [], []
+    for index, intent in enumerate(intents):
+        if _waits_for_umbrella(intent, written):
+            held.append(index)
+            continue
+        verdicts[index] = _promote_one(intent, roots, repo_name)
+        if _waits_for_skill_pointer(verdicts[index], written):
+            pointer_waiters.append(index)
+
+    # A source may precede its target, and dependency chains may be reversed. Retry only after
+    # another waiter actually lands; a rejected target never becomes an exemption.
+    while pointer_waiters:
+        pending, progress = [], False
+        for index in pointer_waiters:
+            verdicts[index] = _promote_one(intents[index], roots, repo_name)
+            if verdicts[index]["ok"]:
+                progress = True
+            elif _waits_for_skill_pointer(verdicts[index], written):
+                pending.append(index)
+        if not progress:
+            break
+        pointer_waiters = pending
+
+    rejected = {intent["name"] for intent, verdict in zip(intents, verdicts, strict=True)
+                if verdict is not None and not verdict["ok"] and _written_name(intent)}
+    for index in held:
+        umbrella = intents[index]["absorbed_into"]
+        verdicts[index] = (
+            _reject("delete", None, [("absorbed_into", f"umbrella {umbrella!r} was rejected in this run")])
+            if umbrella in rejected else _promote_one(intents[index], roots, repo_name))
+    return verdicts
+
+
 def _drain_run(run_id, *, roots, repo_name, proot, provenance=None):
     """Land one run's queued intents: take (atomic claim), promote, account, drop. Notification
     is the caller's job, so a fire-and-forget send never holds the drain lock. A promotion that
@@ -354,7 +457,7 @@ def _drain_run(run_id, *, roots, repo_name, proot, provenance=None):
     queue, so the next drain retries it instead of waiting for the orphans scan."""
     intents = intent_queue.take(run_id, proot)
     try:
-        verdicts = [_promote_one(i, roots, repo_name) for i in intents]
+        verdicts = _promote_run(intents, roots, repo_name)
         if config.PROPOSE_ONLY and intents:
             # every intent whole, rejected ones too (a patch to a hand-written skill is exactly what the
             # shared gate needs), durable before drop: a crash re-proposes, the gate drops the replay

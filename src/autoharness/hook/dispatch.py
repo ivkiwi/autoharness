@@ -113,7 +113,12 @@ def _curate_run_id(event, pcount):
 
 def _is_reflector(event):
     at = str(event.get("agent_type") or "")
-    return at == config.REFLECTOR_AGENT or at.endswith(":reflector")
+    return at == config.REFLECTOR_AGENT
+
+
+def _is_curator(event):
+    at = str(event.get("agent_type") or "")
+    return at == config.CURATOR_AGENT
 
 
 def _detached_launch(transcript_path, session_id, run_id, roots):
@@ -136,7 +141,9 @@ def _reflect(event, result, roots, launch=None):
         if layer.HARNESS == "codex" and result.get("session_id"):  # the window is gone: say so on disk
             tails.gap(result["session_id"], "no_transcript_path", result.get("count", 0), roots.get(layer.PROJECT))
         return
-    (launch or _detached_launch)(transcript_path, result.get("session_id", ""), _run_id(result), roots)
+    return (launch or _detached_launch)(
+        transcript_path, result.get("session_id", ""), _run_id(result), roots
+    )
 
 
 def _consolidate_launch(run_id, roots):
@@ -179,24 +186,33 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
                 result = {**result, "drain_error": drain_error}
             if layer.HARNESS == "codex":
                 _codex_tail(event, result, proot)
+            launch_error = None
             if result.get("triggered"):
-                fire(event, result, roots)
+                launch_result = fire(event, result, roots)
+                if isinstance(launch_result, dict) and launch_result.get("error"):
+                    launch_error = launch_result["error"]
             if config.CONSOLIDATE_EVERY_N and pcount % config.CONSOLIDATE_EVERY_N == 0:
                 curate(_curate_run_id(event, pcount), roots)  # periodic content-level merge pass (rarer than reflection)
-            return {"handled": name, "result": result}
+            verdict = {"handled": name, "result": result}
+            if launch_error:
+                verdict["error"] = launch_error
+            return verdict
         if name == "SessionEnd":
             result = on_session_end.on_session_end(event, root=proot)
             if result.get("triggered"):
-                fire(event, result, roots)
+                launch_result = fire(event, result, roots)
+                if isinstance(launch_result, dict) and launch_result.get("error"):
+                    return {"handled": name, "result": result, "error": launch_result["error"]}
             return {"handled": name, "result": result}
         if name == "PreToolUse":
             tool = event.get("tool_name")
             child = bool(os.environ.get(config.CHILD_SESSION_ENV))
             if child and tool not in _CHILD_ALLOWED_TOOLS[layer.HARNESS]:
                 return {"deny": True, "reason": "autoharness child may only read and stage intents"}
-            if tool in _WRITE_TOOLS and _is_reflector(event):
+            maintenance_agent = _is_reflector(event) or _is_curator(event)
+            if tool in _WRITE_TOOLS and (child or maintenance_agent):
                 return {"deny": True, "reason": "reflector may only stage intents, not write files"}
-            if not child:  # direction H: every main-session tool call advances the activity numerator
+            if not child and not maintenance_agent:  # direction H: every main-session tool call advances the activity numerator
                 sid = event.get("session_id")
                 if isinstance(sid, str) and sid:
                     try:
@@ -204,9 +220,11 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
                     except ValueError:
                         pass  # unsafe session id: skip counting, never crash the host hook
             if tool == "Skill":
+                if maintenance_agent:
+                    return {"handled": name, "result": {"counted": False, "reason": "recursion_guard"}}
                 return {"handled": name, "result": on_skill_call.on_skill_call(event, roots=roots)}
             if tool == "Read":
-                if child or _is_reflector(event):
+                if child or maintenance_agent:
                     return {"handled": name, "result": {"counted": False, "reason": "reflector_read"}}
                 return {"handled": name, "result": on_skill_call.on_skill_read(event, roots=roots)}
             return {"ignored": True, "reason": "untracked PreToolUse"}
@@ -216,6 +234,8 @@ def dispatch(event, *, roots=None, reflect=None, consolidate=None):
 
 
 def _emit(verdict):
+    if verdict.get("error"):
+        print(json.dumps({"error": verdict["error"]}), file=sys.stderr)
     if verdict.get("deny"):
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -233,8 +253,6 @@ def _emit(verdict):
     handled = verdict.get("handled")
     if handled:
         print(json.dumps({"handled": handled, "result": result}), file=sys.stderr)
-    elif verdict.get("error"):
-        print(json.dumps({"error": verdict["error"]}), file=sys.stderr)  # a crashed handler is not silent
 
 
 def main():

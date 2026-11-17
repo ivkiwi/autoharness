@@ -55,6 +55,22 @@ def test_bool_env_accepts_0_and_1():
             assert len(w) == 0
 
 
+def test_child_isolation_uses_bool_env_validation():
+    import importlib
+
+    from autoharness import config as cfg
+    try:
+        with patch.dict(os.environ, {"AUTOHARNESS_CHILD_ISOLATION": "2"}):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                importlib.reload(cfg)
+        assert cfg.CHILD_ISOLATION is False
+        assert any("AUTOHARNESS_CHILD_ISOLATION=2 should be 0 or 1" in str(item.message)
+                   for item in caught)
+    finally:
+        importlib.reload(cfg)
+
+
 def test_int_env_rejects_values_below_minimum():
     from autoharness import config as cfg
     with patch.dict(os.environ, {"AUTOHARNESS_TEST_MIN": "-3"}):
@@ -74,6 +90,17 @@ def test_int_env_accepts_value_at_minimum():
             assert len(w) == 0
 
 
+def test_string_env_trims_values_and_rejects_explicit_blank():
+    from autoharness import config as cfg
+    with patch.dict(os.environ, {"AUTOHARNESS_TEST_MODEL": "  sonnet  "}):
+        assert cfg._str_env("AUTOHARNESS_TEST_MODEL") == "sonnet"
+    with patch.dict(os.environ, {"AUTOHARNESS_TEST_MODEL": "   "}):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert cfg._str_env("AUTOHARNESS_TEST_MODEL") is None
+        assert any("AUTOHARNESS_TEST_MODEL is empty" in str(item.message) for item in caught)
+
+
 def test_negative_reflect_cadence_does_not_trigger_every_turn(tmp_path):
     import importlib
 
@@ -86,5 +113,21 @@ def test_negative_reflect_cadence_does_not_trigger_every_turn(tmp_path):
     try:
         assert cfg.REFLECT_EVERY_N == 50
         assert on_stop.on_stop({"session_id": "s1"}, root=tmp_path)["triggered"] is False
+    finally:
+        importlib.reload(cfg)
+
+
+def test_invalid_min_flush_falls_back_to_one():
+    import importlib
+
+    from autoharness import config as cfg
+    try:
+        with patch.dict(os.environ, {"AUTOHARNESS_MIN_FLUSH_N": "0"}):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                importlib.reload(cfg)
+        assert cfg.MIN_FLUSH_N == 1
+        assert any("AUTOHARNESS_MIN_FLUSH_N=0 is below the minimum 1" in str(item.message)
+                   for item in caught)
     finally:
         importlib.reload(cfg)

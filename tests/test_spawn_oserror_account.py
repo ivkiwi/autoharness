@@ -24,6 +24,7 @@ def test_missing_executable_is_recorded_without_real_child(tmp_path, curate):
             spawn.run(
                 "window", "launch-failure", roots=roots, spec_path=spec, spawn_fn=fail
             )
+
     account = layer.state_dir("project", roots["project"]) / "runs/launch-failure.json"
     assert account.exists()
     record = json.loads(account.read_text())

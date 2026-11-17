@@ -6,6 +6,7 @@ values. Overridable via AUTOHARNESS_* env — for the e2e runbook to shrink the 
 capacity contention fire within a short session); defaults fall back to the placeholders.
 """
 import os
+import shutil
 import warnings
 from pathlib import Path
 
@@ -26,6 +27,20 @@ def _int_env(name, default, minimum=None):
     return value
 
 
+def _str_env(name, default=None):
+    """Read a non-empty string knob; an explicit blank is a typo, not an override."""
+    try:
+        raw = os.environ[name]
+    except KeyError:
+        return default
+    value = raw.strip()
+    if not value:
+        fallback = repr(default) if default is not None else "the agent default"
+        warnings.warn(f"{name} is empty; using {fallback}", stacklevel=2)
+        return default
+    return value
+
+
 # trigger cadence, counted in the activity quantum (main-session tool calls, direction H) — not turns.
 # Recalibrated with the numerator: the old turn-based 10 lands near 30-50 tool calls, and the standing
 # ruling is to err sparse (precipitation is maintenance, and SessionEnd flushes the tail).
@@ -33,6 +48,10 @@ REFLECT_EVERY_N = _int_env("AUTOHARNESS_REFLECT_EVERY_N", 50, minimum=1)  # the 
 # a child that never completes (a refusal before the model, a missing binary) must not be fed the same
 # window forever: after this many failed launches in a row the window is given up as a coverage gap
 REFLECT_MAX_FAILURES = _int_env("AUTOHARNESS_REFLECT_MAX_FAILURES", 3, minimum=1)
+# SessionEnd tail flushes are independent of the mid-session cadence above. Keep the historical
+# flush-any-positive-tail behaviour by default, while allowing operators to decline tiny, expensive
+# reflector runs. A skipped tail is deliberately discarded when the session counter is cleared.
+MIN_FLUSH_N = _int_env("AUTOHARNESS_MIN_FLUSH_N", 1, minimum=1)
 CONSOLIDATE_EVERY_N = _int_env("AUTOHARNESS_CONSOLIDATE_EVERY_N", 250)  # ponytail: placeholder, calibrate in experiments/; curator (content-level merge) beat, same quantum as REFLECT_EVERY_N and held sparser than it
 
 # raw-capture byte caps (ponytail: placeholders, calibrate in experiments/): per transcript record,
@@ -51,9 +70,12 @@ SKILL_BODY_MAX_LINES = _int_env("AUTOHARNESS_SKILL_BODY_MAX_LINES", 25, minimum=
 # description is the trigger: the host preloads name+description and matches recall on it, so a skill
 # lives or dies here. Cap = Anthropic's documented 1024-char host limit (past it the host truncates).
 SKILL_DESC_MAX_CHARS = _int_env("AUTOHARNESS_SKILL_DESC_MAX_CHARS", 1024)
-# self-injected recall index (SessionStart additionalContext): per-line description truncation,
-# mirroring Hermes's tier-0 index discipline — the index is a scan surface, not the full trigger text.
+# Description budget used by authoring validation and reflector indexes. SessionStart does not repeat
+# descriptions: Claude Code already supplies every native skill name and full description.
 INDEX_DESC_MAX_CHARS = _int_env("AUTOHARNESS_INDEX_DESC_MAX_CHARS", 60, minimum=4)
+# Keep SessionStart's additive layer/category map below Claude Code's persisted-output threshold.
+# The native skill list remains the complete recall surface when the compact map omits names.
+SESSION_INDEX_MAX_BYTES = 1_600
 # self-injection off switch: the index stops being emitted, everything else (lifecycle pass,
 # use/view counters, the last-run summary) is untouched. Needed because the only other way to run
 # without the index is to run without the plugin — which also removes the counters that measure the
@@ -70,6 +92,7 @@ def _bool_env(name, default):
 
 
 INDEX_SUSPENDED = _bool_env("AUTOHARNESS_INDEX_SUSPENDED", False)
+INDEX_BODY_PATHS = _bool_env("AUTOHARNESS_INDEX_BODY_PATHS", False)
 DISABLE_GLOBAL = _bool_env("AUTOHARNESS_DISABLE_GLOBAL", False)
 # phase 1 of a shared publishing gate: every intent is still validated, but nothing lands and the
 # lifecycle archives nothing; intents with their verdicts go to proposals/ for that gate to decide
@@ -121,6 +144,19 @@ NOTIFY = os.environ.get("AUTOHARNESS_NOTIFY", "").strip().lower()
 NOTIFY_CMD = os.environ.get("AUTOHARNESS_NOTIFY_CMD", "")
 NOTIFY_TIMEOUT_S = max(1, _int_env("AUTOHARNESS_NOTIFY_TIMEOUT_S", 5))
 
+# Name prefix every agent-authored skill must carry (empty = no constraint). A prefix keeps the
+# library out of the namespace of hand-written and installed skills, so a create can never collide
+# with one, and gives a repository a single ignore pattern for everything autoharness writes into it
+# (the promoter adds that pattern to the repository's shared info/exclude on first landing).
+SKILL_PREFIX = os.environ.get("AUTOHARNESS_SKILL_PREFIX", "")
+
+# Launch child sessions (reflector / curator) without the user's settings sources: no other plugins,
+# no user hooks, no project settings — only this plugin, loaded by --plugin-dir, running from its
+# state directory so no project CLAUDE.md is read. Opt-in because it also drops settings a child may
+# rely on, such as an apiKeyHelper; OAuth and environment credentials are unaffected.
+CHILD_ISOLATION = _bool_env("AUTOHARNESS_CHILD_ISOLATION", False)
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 _LIB = Path(__file__).parent / "lib"
 REDACTION_RULES = _LIB / "redaction_rules.toml"  # secret/PII rule set, single source for CAP egress + LED
 FORMAT_SPEC = _LIB / "format_spec.md"            # #416 single source for authoring + lint
@@ -135,7 +171,11 @@ REFLECTOR_CARRIER = os.environ.get("AUTOHARNESS_CARRIER", "bundle")
 
 REFLECTOR_AGENT = "autoharness:reflector"  # the --agent reference for spawn (plugin namespace, Phase 0 resolution pending live test)
 CURATOR_AGENT = "autoharness:curator"      # the --agent reference for the periodic consolidation pass (same spawn chain as reflector)
-CLAUDE_BIN = "claude"                       # the child-session executable for spawn; PATH resolution, overridable in tests
+# Unset means "let the agent frontmatter decide" (currently `model: haiku`), preserving the exact
+# historical command line. An explicit value becomes a --model override for the maintenance session.
+REFLECTOR_MODEL = _str_env("AUTOHARNESS_REFLECTOR_MODEL")
+CURATOR_MODEL = _str_env("AUTOHARNESS_CURATOR_MODEL")
+CLAUDE_BIN = shutil.which("claude") or "claude"  # the child-session executable for spawn; which() honours PATHEXT so Windows resolves claude.cmd (bare "claude" raises WinError 2 under CreateProcess); overridable in tests
 RUN_ID_ENV = "AUTOHARNESS_RUN_ID"           # spawn injects the intent-queue run_id into the child session via env (read by stage_skill)
 # The queue for intents staged from a live user session (/learn, or the model acting on its own).
 # spawn injects a run id into every child it launches and drains that run when the child exits; a

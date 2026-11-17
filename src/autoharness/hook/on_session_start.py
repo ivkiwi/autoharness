@@ -22,28 +22,18 @@ from autoharness.lib import counters, layer, lifecycle, sidecar, skill_store, va
 
 log = logging.getLogger(__name__)
 
-# Recall self-injection (mng.md §召回面自持): the host's native description recall stays untouched;
-# this compact index of self-produced skills rides SessionStart additionalContext so "whether the
-# library is offered" is our own config, not host behavior. Grouped by frontmatter category
-# (open set, absent -> general), alphabetical within a group, layer-tagged per line.
+# Claude Code already injects every available skill name and full description. SessionStart adds only
+# autoharness ownership metadata the native list lacks: category and layer. Repeating descriptions
+# wastes context and makes large hook output get persisted behind a short preview.
 INDEX_HEADER = (
-    "Self-accumulated skills (autoharness-managed). When the task at hand matches a "
-    "description below, you MUST consider loading that skill before proceeding."
+    "Autoharness-managed skills are already present with full descriptions in Claude Code's native "
+    "skill list. You MUST consider loading a matching skill before proceeding. This compact map adds "
+    "category and ownership layer only."
 )
 
 
 def _sanitize(text, limit):
     return " ".join(str(text).split())[:limit]  # line-based surface: newlines are forgery, collapse them
-
-
-def _fit(text, limit):
-    """Truncate with an ellipsis so a cut line reads as cut (hermes' index does the same).
-
-    New descriptions are held inside the budget by the promoter, so this only fires on skills that
-    predate the gate — and there it matters that the reader can tell the line was severed rather
-    than take a fragment for the whole trigger."""
-    flat = " ".join(str(text).split())
-    return flat if len(flat) <= limit else flat[:limit - 3] + "..."
 
 
 def _read_hint(roots, cwd):
@@ -59,6 +49,30 @@ def _read_hint(roots, cwd):
             f"Read {skills}/<name>/SKILL.md instead.")
 
 
+def _compact_map(groups, hint=None):
+    entries = [(category, line) for category in sorted(groups) for line in sorted(groups[category])]
+    lines = [INDEX_HEADER]
+    if hint:
+        lines.extend(["", _sanitize(hint, 512)])
+    lines.append("")
+    included = 0
+    current_category = None
+    for category, entry in entries:
+        addition = ([f"## {category}"] if category != current_category else []) + [entry]
+        remaining = len(entries) - included - 1
+        tail = (["", f"... {remaining} more managed skills; use the native list for the complete set."]
+                if remaining else [])
+        if len("\n".join(lines + addition + tail).encode("utf-8")) > config.SESSION_INDEX_MAX_BYTES:
+            break
+        lines.extend(addition)
+        current_category = category
+        included += 1
+    omitted = len(entries) - included
+    if omitted:
+        lines.extend(["", f"... {omitted} more managed skills; use the native list for the complete set."])
+    return "\n".join(lines)
+
+
 def recall_index(roots, cwd=None):
     if config.INDEX_SUSPENDED:
         return None
@@ -70,7 +84,16 @@ def recall_index(roots, cwd=None):
             continue
         for path in skills.glob(f"*/{skill_store.SKILL_FILE}"):
             name = path.parent.name
-            if not sidecar.is_agent_created(lyr, name, root):
+            try:
+                layer._check_name(name)
+            except ValueError:
+                continue  # handwritten skills are outside the managed pool
+            try:
+                managed = sidecar.is_agent_created(lyr, name, root)
+            except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
+                log.warning("skipping skill with unreadable sidecar: %s", path.parent)
+                continue
+            if not managed:
                 continue
             try:
                 text = path.read_text(encoding="utf-8")
@@ -78,20 +101,13 @@ def recall_index(roots, cwd=None):
                 log.warning("skipping unreadable skill description: %s", path)
                 continue
             fm = validate._frontmatter(text) or {}
-            desc = _fit(fm.get("description") or "(no description)", config.INDEX_DESC_MAX_CHARS)
             cat = _sanitize(fm.get("category") or "general", 64) or "general"
-            groups.setdefault(cat, []).append(f"- {_sanitize(name, 64)} [{lyr}]: {desc}")
+            groups.setdefault(cat, []).append(f"- {_sanitize(name, 64)} [{lyr}]")
             has_project = has_project or lyr == layer.PROJECT
     if not groups:
         return None  # empty library -> zero injection
-    lines = [INDEX_HEADER, ""]
-    for cat in sorted(groups):
-        lines.append(f"## {cat}")
-        lines.extend(sorted(groups[cat]))
     hint = _read_hint(roots, cwd) if has_project else None
-    if hint:
-        lines += ["", hint]
-    return "\n".join(lines)
+    return _compact_map(groups, hint)
 
 
 def last_run_summary(roots):
@@ -127,8 +143,21 @@ def last_run_summary(roots):
         line += f" ({', '.join(families)})"
     if last.get("absorbed"):
         line += f"; merged {last['absorbed']} into umbrellas"
+    if last.get("suggested"):
+        line += f"; recorded {last['suggested']} read-only owner suggestion(s)"
     if last.get("uncategorized"):
         line += f"; {last['uncategorized']} landed with no category (grouped under general)"
+    suggestions = last.get("suggestions")
+    if isinstance(suggestions, list):
+        rendered = []
+        for item in suggestions[:3]:
+            if not isinstance(item, dict):
+                continue
+            owner = _sanitize(item.get("owner") or "unknown owner", 80)
+            suggestion = _sanitize(item.get("suggestion") or "review suggested change", 160)
+            rendered.append(f"{owner}: {suggestion}")
+        if rendered:
+            line += "; read-only suggestions: " + " | ".join(rendered)
     return line
 
 
@@ -139,6 +168,10 @@ def _members(lyr, root):
     members = []
     for path in skills.glob(f"*/{skill_store.SKILL_FILE}"):
         name = path.parent.name
+        try:
+            layer._check_name(name)
+        except ValueError:
+            continue
         if not sidecar.is_agent_created(lyr, name, root):
             continue
         s = sidecar.read(lyr, name, root)

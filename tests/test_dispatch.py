@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from autoharness import config
-from autoharness.hook import dispatch
+from autoharness.hook import dispatch, spawn
 from autoharness.lib import counters, layer, sidecar, skill_store
 
 
@@ -354,6 +354,37 @@ def test_codex_child_gets_the_codex_tool_surface(tmp_path, monkeypatch, tool, de
     assert bool(v.get("deny")) is denied
 
 
+
+def test_child_dispatch_allows_listed_body_read_but_denies_outside_write_and_bash(tmp_path, monkeypatch):
+    monkeypatch.setenv(config.CHILD_SESSION_ENV, "1")
+    monkeypatch.setattr(config, "INDEX_BODY_PATHS", True)
+    roots = _roots(tmp_path)
+    body = skill_store.skill_path("project", "listed", roots["project"])
+    skill_store.write_body(
+        "project", "listed",
+        "---\nname: listed\ndescription: Use when listed.\n---\nRule.\n",
+        roots["project"],
+    )
+    assert str(body) in spawn.description_index(roots)
+
+    read = dispatch.dispatch({
+        "hook_event_name": "PreToolUse", "tool_name": "Read",
+        "tool_input": {"file_path": str(body)}, "session_id": "child",
+    }, roots=roots)
+    assert not read.get("deny")
+
+    outside = tmp_path / "outside.txt"
+    write = dispatch.dispatch({
+        "hook_event_name": "PreToolUse", "tool_name": "Write",
+        "tool_input": {"file_path": str(outside), "content": "x"}, "session_id": "child",
+    }, roots=roots)
+    bash = dispatch.dispatch({
+        "hook_event_name": "PreToolUse", "tool_name": "Bash",
+        "tool_input": {"command": f"touch {outside}"}, "session_id": "child",
+    }, roots=roots)
+    assert write.get("deny") and bash.get("deny")
+
+
 def _interactive_intent(name="learned"):
     return {"action": "create", "name": name, "level": "project", "reason": "r", "evidence": "e",
             "body": f"---\nname: {name}\ndescription: Use when a learned thing applies.\n---\nRule.\n"}
@@ -474,4 +505,6 @@ def test_torn_interactive_queue_line_no_longer_wedges_every_stop(tmp_path):
 
 def test_a_crashed_handler_is_reported_on_stderr(capsys):
     dispatch._emit({"error": "TypeError: boom"})
-    assert "TypeError: boom" in capsys.readouterr().err
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 1
+    assert "TypeError: boom" in lines[0]

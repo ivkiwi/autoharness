@@ -1,6 +1,8 @@
 import json
 import re
 
+import pytest
+
 from autoharness import config
 from autoharness.lib import intent_queue, layer
 from autoharness.stage_skill import server
@@ -115,6 +117,28 @@ def test_delete_rejects_body(tmp_path):
     v = server.stage({"action": "delete", "name": "foo", "body": GOOD_BODY,
                       "reason": "r", "evidence": "e"}, run_id=RUN, root=tmp_path)
     assert not v["ok"] and "schema" in _errs(v)
+
+
+def test_suggest_accepts_read_only_owner_label_without_touching_tree(tmp_path):
+    params = {"action": "suggest", "name": "plugin:deploy@market",
+              "reason": "Update the deploy command", "evidence": "Use make release now"}
+
+    verdict = server.stage(params, run_id=RUN, root=tmp_path)
+
+    assert verdict["ok"]
+    assert _queue(tmp_path) == [params]
+    assert not layer.skills_dir("project", tmp_path).exists()
+
+
+def test_suggest_rejects_skill_mutation_fields(tmp_path):
+    verdict = server.stage(
+        {"action": "suggest", "name": "CLAUDE.md", "reason": "Update the rule",
+         "evidence": "new rule", "body": GOOD_BODY},
+        run_id=RUN, root=tmp_path,
+    )
+
+    assert not verdict["ok"] and "schema" in _errs(verdict)
+    assert _queue(tmp_path) == []
 
 
 def test_bad_level_rejected_zero_append(tmp_path):
@@ -360,6 +384,26 @@ def test_delete_accepts_absorbed_into(tmp_path):
     assert r["ok"]
 
 
+@pytest.mark.parametrize("reason", [
+    "Absorbed into expo-mobile-app-release as its unit-test section.",
+    "folded  into the deploy umbrella",
+    "Merged by hand: consolidated into deploy",
+    "已合并到 deploy",
+])
+def test_delete_claiming_a_fold_must_name_the_umbrella(tmp_path, reason):
+    params = {"action": "delete", "name": "narrow", "reason": reason, "evidence": "e"}
+    refused = server.stage(params, run_id="r1", root=tmp_path)
+    assert not refused["ok"] and refused["errors"][0][0] == "schema"
+    assert intent_queue.read("r1", tmp_path) == []
+    assert server.stage({**params, "absorbed_into": "deploy"}, run_id="r1", root=tmp_path)["ok"]
+
+
+@pytest.mark.parametrize("reason", ["stale", "merged", "no longer used", "unfolded into nothing useful"])
+def test_plain_retirement_needs_no_umbrella(tmp_path, reason):
+    assert server.stage({"action": "delete", "name": "narrow", "reason": reason, "evidence": "e"},
+                        run_id="r1", root=tmp_path)["ok"]
+
+
 def test_absorbed_into_rejected_on_non_delete(tmp_path):
     for action, extra in (("create", {"body": "b", "level": "project"}),
                           ("patch", {"old_string": "a", "new_string": "b"}),
@@ -436,3 +480,13 @@ def test_each_staging_gets_its_own_id_and_a_retry_keeps_it(tmp_path):
     assert [r["stage_id"] for r in intent_queue.read(RUN, tmp_path)] == [first, second]  # re-read: stable
 
 
+def test_stage_hands_the_prefix_rule_back_to_the_author(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SKILL_PREFIX", "ah-")
+    v = server.stage(_params(), run_id=RUN, root=tmp_path)
+    assert not v["ok"] and "prefix" in _errs(v)
+    assert _queue(tmp_path) == []
+
+
+def test_stage_rejects_a_frontmatter_name_that_is_not_the_skill_name(tmp_path):
+    v = server.stage(_params(name="bar"), run_id=RUN, root=tmp_path)
+    assert not v["ok"] and "structure" in _errs(v)

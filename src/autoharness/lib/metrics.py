@@ -68,13 +68,22 @@ def _funnel(lyr, root):
                 run = json.loads(path.read_text(encoding="utf-8"))
             except (ValueError, OSError):
                 continue  # a corrupt account never breaks reporting
+            if not isinstance(run, dict) or not isinstance(run.get("verdicts", []), list):
+                continue
             for v in run.get("verdicts", []):
+                if not isinstance(v, dict):
+                    continue
                 proposed += 1
                 if v.get("ok") and v.get("proposed"):
                     held += 1  # PROPOSE_ONLY: valid, kept for the shared gate, nothing landed
                 elif v.get("ok"):
                     landed += 1
-                for family in v.get("findings", []):
+                findings = v.get("findings", [])
+                if not isinstance(findings, list):
+                    continue
+                for family in findings:
+                    if not isinstance(family, str):
+                        continue
                     families[family] = families.get(family, 0) + 1
     return {"proposed": proposed, "landed": landed, "held": held, "rejected": proposed - landed - held}, families
 
